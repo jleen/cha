@@ -1,4 +1,5 @@
 use fancy_regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 const PUNCTUATION: &[char] = &[' ', '-', '\''];
@@ -22,10 +23,12 @@ pub fn compile_pattern(pattern_str: &str) -> Matcher {
     let has_punct = pattern_str.chars().any(|c| PUNCTUATION.contains(&c));
 
     Box::new(move |word: &str| {
-        let test_word: String = if has_punct {
-            word.to_string()
+        let test_word: Cow<str> = if has_punct {
+            Cow::Borrowed(word)
+        } else if word.chars().any(|c| PUNCTUATION.contains(&c)) {
+            Cow::Owned(word.chars().filter(|c| !PUNCTUATION.contains(c)).collect())
         } else {
-            word.chars().filter(|c| !PUNCTUATION.contains(c)).collect()
+            Cow::Borrowed(word)
         };
         matchers.iter().all(|(negate, m)| {
             let result = m(&test_word);
@@ -109,12 +112,14 @@ fn template_to_regex(template: &str) -> String {
     out
 }
 
-fn count_chars(chars: &[char]) -> HashMap<char, usize> {
-    let mut map = HashMap::new();
+fn count_chars(chars: &[char]) -> [usize; 26] {
+    let mut counts = [0usize; 26];
     for &c in chars {
-        *map.entry(c).or_insert(0) += 1;
+        if c.is_ascii_lowercase() {
+            counts[(c as u8 - b'a') as usize] += 1;
+        }
     }
-    map
+    counts
 }
 
 fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
@@ -194,13 +199,12 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
             }
         }
 
-        let word_lower = word.to_lowercase();
-        let word_alpha: Vec<char> = word_lower.chars().filter(|c| c.is_alphabetic()).collect();
+        let word_alpha: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
         let word_counter = count_chars(&word_alpha);
 
         'combo: for combo in &choice_combos {
             let mut pool: Vec<char> = fixed_letters.clone();
-            pool.extend(combo.iter().map(|c| c.to_lowercase().next().unwrap()));
+            pool.extend(combo.iter().map(|c| c.to_ascii_lowercase()));
             let pool_counter = count_chars(&pool);
             let pool_size = pool.len() + num_wildcards;
 
@@ -209,17 +213,14 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
             }
 
             if is_pure {
-                for (letter, &count) in &pool_counter {
-                    if word_counter.get(letter).copied().unwrap_or(0) < count {
+                for i in 0..26 {
+                    if pool_counter[i] > 0 && word_counter[i] < pool_counter[i] {
                         continue 'combo;
                     }
                 }
 
-                let extras: usize = word_counter
-                    .iter()
-                    .map(|(letter, &count)| {
-                        count.saturating_sub(pool_counter.get(letter).copied().unwrap_or(0))
-                    })
+                let extras: usize = (0..26)
+                    .map(|i| word_counter[i].saturating_sub(pool_counter[i]))
                     .sum();
 
                 if !has_star && extras != num_wildcards {
@@ -229,19 +230,15 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
                 // Hybrid: full_counter[x] = max(template_count[x], pool_count[x])
                 // This models template letters being implicitly in the anagram pool.
                 let template_counter = count_chars(&template_letters);
-                let mut full_counter = template_counter.clone();
-                for (&letter, &count) in &pool_counter {
-                    let entry = full_counter.entry(letter).or_insert(0);
-                    if count > *entry {
-                        *entry = count;
+                let mut full_counter = template_counter;
+                for i in 0..26 {
+                    if pool_counter[i] > full_counter[i] {
+                        full_counter[i] = pool_counter[i];
                     }
                 }
 
-                let extras: usize = word_counter
-                    .iter()
-                    .map(|(letter, &count)| {
-                        count.saturating_sub(full_counter.get(letter).copied().unwrap_or(0))
-                    })
+                let extras: usize = (0..26)
+                    .map(|i| word_counter[i].saturating_sub(full_counter[i]))
                     .sum();
 
                 if !has_star && extras > num_wildcards {
@@ -249,7 +246,7 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
                 }
             }
 
-            if !sub_patterns.iter().all(|sp| word_lower.contains(sp.as_str())) {
+            if !sub_patterns.iter().all(|sp| word.contains(sp.as_str())) {
                 continue;
             }
 
