@@ -122,6 +122,18 @@ fn count_chars(chars: &[char]) -> [usize; 26] {
     counts
 }
 
+fn count_str(s: &str) -> ([usize; 26], usize) {
+    let mut counts = [0usize; 26];
+    let mut len = 0;
+    for b in s.bytes() {
+        if b.is_ascii_alphabetic() {
+            counts[(b.to_ascii_lowercase() - b'a') as usize] += 1;
+            len += 1;
+        }
+    }
+    (counts, len)
+}
+
 fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
     let mut result: Vec<Vec<char>> = vec![vec![]];
     for choice in choices {
@@ -192,6 +204,17 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
         })
         .unwrap_or_default();
 
+    let fixed_counter = count_chars(&fixed_letters);
+    let fixed_size = fixed_letters.len();
+    let template_counter = count_chars(&template_letters);
+    let combo_pools: Vec<([usize; 26], usize)> = choice_combos.iter().map(|combo| {
+        let mut counter = fixed_counter;
+        for &c in combo {
+            counter[(c.to_ascii_lowercase() as u8 - b'a') as usize] += 1;
+        }
+        (counter, fixed_size + combo.len())
+    }).collect();
+
     Box::new(move |word: &str| {
         if let Some(ref tm) = template_matcher {
             if !tm(word) {
@@ -199,16 +222,12 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
             }
         }
 
-        let word_alpha: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
-        let word_counter = count_chars(&word_alpha);
+        let (word_counter, word_len) = count_str(word);
 
-        'combo: for combo in &choice_combos {
-            let mut pool: Vec<char> = fixed_letters.clone();
-            pool.extend(combo.iter().map(|c| c.to_ascii_lowercase()));
-            let pool_counter = count_chars(&pool);
-            let pool_size = pool.len() + num_wildcards;
+        'combo: for (pool_counter, pool_base) in &combo_pools {
+            let pool_size = pool_base + num_wildcards;
 
-            if is_pure && !has_star && word_alpha.len() != pool_size {
+            if is_pure && !has_star && word_len != pool_size {
                 continue;
             }
 
@@ -229,7 +248,6 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Matcher {
             } else {
                 // Hybrid: full_counter[x] = max(template_count[x], pool_count[x])
                 // This models template letters being implicitly in the anagram pool.
-                let template_counter = count_chars(&template_letters);
                 let mut full_counter = template_counter;
                 for i in 0..26 {
                     if pool_counter[i] > full_counter[i] {
