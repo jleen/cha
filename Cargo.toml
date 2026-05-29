@@ -1,0 +1,11 @@
+[package]
+name = "char"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "char"
+path = "src/main.rs"
+
+[dependencies]
+fancy-regex = "0"
