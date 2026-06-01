@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 fancy-regex = "0"
+terminal_size = "0"

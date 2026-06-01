@@ -2,8 +2,10 @@ mod dictionary;
 mod pattern;
 
 use clap::Parser;
+use std::io::{BufWriter, IsTerminal, Write};
 use std::process;
 use std::time::Instant;
+use terminal_size::{Width, terminal_size};
 
 #[derive(Parser)]
 struct Args {
@@ -16,6 +18,56 @@ struct Args {
     bench_count: usize,
 }
 
+fn print_columns(words: &[&str]) {
+    if words.is_empty() {
+        return;
+    }
+    let term_width = terminal_size().map(|(Width(w), _)| w as usize).unwrap_or(80);
+    let max_len = words.iter().map(|w| w.len()).max().unwrap();
+    let max_cols = ((term_width + 2) / (max_len + 2)).max(1);
+
+    // Find the appropriate width for each column.
+    // This is a trial-and-error process since it depends on the max word length
+    // in each candidate column.
+    let ncols = (1..=max_cols).rev().find(|&nc| {
+        let nrows = words.len().div_ceil(nc);
+        let total: usize = (0..nc)
+            .map(|c| (c * nrows..((c + 1) * nrows).min(words.len())).map(|i| words[i].len()).max().unwrap_or(0))
+            .sum::<usize>()
+            + (nc - 1) * 2;
+        total <= term_width
+    }).unwrap_or(1);
+
+    // Trial-and-error complete. So what did we get?
+    let nrows = words.len().div_ceil(ncols);
+    let col_widths: Vec<usize> = (0..ncols)
+        .map(|c| (c * nrows..((c + 1) * nrows).min(words.len())).map(|i| words[i].len()).max().unwrap_or(0))
+        .collect();
+
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    for row in 0..nrows {
+        for col in 0..ncols {
+            let idx = col * nrows + row;
+            if idx >= words.len() {
+                break;
+            }
+            if col > 0 {
+                out.write_all(b"  ").unwrap();
+            }
+            let word = words[idx];
+            out.write_all(word.as_bytes()).unwrap();
+            if col + 1 < ncols && idx + nrows < words.len() {
+                let pad = col_widths[col] - word.len();
+                for _ in 0..pad {
+                    out.write_all(b" ").unwrap();
+                }
+            }
+        }
+        out.write_all(b"\n").unwrap();
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -26,9 +78,16 @@ fn main() {
     });
 
     if args.bench_count == 1 {
-        for word in &words {
-            if matcher(word) {
-                println!("{}", word);
+        let stdout = std::io::stdout();
+        if stdout.is_terminal() {
+            let matches: Vec<&str> = words.iter().filter(|w| matcher(w)).map(String::as_str).collect();
+            print_columns(&matches);
+        } else {
+            let mut out = BufWriter::new(stdout.lock());
+            for word in &words {
+                if matcher(word) {
+                    writeln!(out, "{}", word).unwrap();
+                }
             }
         }
     } else {
