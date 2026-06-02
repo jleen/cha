@@ -2,6 +2,7 @@ mod dictionary;
 mod pattern;
 
 use clap::Parser;
+use rustyline::DefaultEditor;
 use std::io::{BufWriter, IsTerminal, Write};
 use std::process;
 use std::time::Instant;
@@ -9,13 +10,16 @@ use terminal_size::{Width, terminal_size};
 
 #[derive(Parser)]
 struct Args {
-    pattern: String,
+    pattern: Option<String>,
 
     #[arg(short, long, default_value = "csw2019.txt")]
     wordlist: String,
 
     #[arg(short, long, default_value_t = 1)]
     bench_count: usize,
+
+    #[arg(short, long)]
+    interactive: bool,
 }
 
 fn print_columns(words: &[&str]) {
@@ -68,29 +72,67 @@ fn print_columns(words: &[&str]) {
     }
 }
 
+fn run_pattern(pat: &str, words: &[String]) {
+    let matcher = pattern::compile_pattern(pat);
+    let stdout = std::io::stdout();
+    if stdout.is_terminal() {
+        let matches: Vec<&str> = words.iter().filter(|w| matcher(w)).map(String::as_str).collect();
+        print_columns(&matches);
+    } else {
+        let mut out = BufWriter::new(stdout.lock());
+        for word in words {
+            if matcher(word) {
+                writeln!(out, "{}", word).unwrap();
+            }
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
-    let matcher = pattern::compile_pattern(&args.pattern);
+    if !args.interactive && args.pattern.is_none() {
+        eprintln!("error: a pattern is required unless -i/--interactive is set");
+        process::exit(1);
+    }
+
     let words = dictionary::load_words(&args.wordlist).unwrap_or_else(|e| {
         eprintln!("Error loading word list '{}': {}", args.wordlist, e);
         process::exit(1);
     });
 
-    if args.bench_count == 1 {
-        let stdout = std::io::stdout();
-        if stdout.is_terminal() {
-            let matches: Vec<&str> = words.iter().filter(|w| matcher(w)).map(String::as_str).collect();
-            print_columns(&matches);
-        } else {
-            let mut out = BufWriter::new(stdout.lock());
-            for word in &words {
-                if matcher(word) {
-                    writeln!(out, "{}", word).unwrap();
+    if args.interactive {
+        let mut rl = DefaultEditor::new().unwrap_or_else(|e| {
+            eprintln!("Error initializing line editor: {}", e);
+            process::exit(1);
+        });
+        loop {
+            match rl.readline("> ") {
+                Ok(line) => {
+                    let pat = line.trim();
+                    if pat.is_empty() {
+                        continue;
+                    }
+                    let _ = rl.add_history_entry(pat);
+                    run_pattern(pat, &words);
+                }
+                Err(rustyline::error::ReadlineError::Eof) => break,
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
                 }
             }
         }
+        return;
+    }
+
+    let pat = args.pattern.as_deref().unwrap();
+
+    if args.bench_count == 1 {
+        run_pattern(pat, &words);
     } else {
+        let matcher = pattern::compile_pattern(pat);
         let start = Instant::now();
         for _ in 0..args.bench_count {
             for word in &words {
