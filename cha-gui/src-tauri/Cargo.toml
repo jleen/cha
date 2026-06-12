@@ -1,0 +1,17 @@
+[package]
+name = "cha-gui"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+cha-core = { path = "../../cha-core" }
+serde = { version = "1", features = ["derive"] }
+
+# Pin transitive `time` to 0.3.47: 0.3.48 trips an E0119 coherence false-positive
+# (rust-lang/rust#100712) against cookie 0.18.1 under rustc 1.96. 0.3.47 still
+# satisfies plist's `^0.3.47`. Remove once tauri/cookie or rustc resolves it.
+time = "=0.3.47"

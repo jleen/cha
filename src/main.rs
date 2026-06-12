@@ -12,7 +12,7 @@ use terminal_size::{Width, terminal_size};
 struct Args {
     pattern: Option<String>,
 
-    #[arg(short, long, default_value = "csw2019.txt")]
+    #[arg(short, long, default_value = "words.txt")]
     wordlist: String,
 
     #[arg(short, long, default_value_t = 1)]
@@ -73,7 +73,13 @@ fn print_columns(words: &[&str]) {
 }
 
 fn run_pattern(pat: &str, words: &[String]) {
-    let matcher = pattern::compile_pattern(pat);
+    let matcher = match pattern::compile_pattern(pat) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return;
+        }
+    };
     let stdout = std::io::stdout();
     if stdout.is_terminal() {
         let matches: Vec<&str> = words.iter().filter(|w| matcher(w)).map(String::as_str).collect();
@@ -132,7 +138,10 @@ fn main() {
     if args.bench_count == 1 {
         run_pattern(pat, &words);
     } else {
-        let matcher = pattern::compile_pattern(pat);
+        let matcher = pattern::compile_pattern(pat).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        });
         let start = Instant::now();
         for _ in 0..args.bench_count {
             for word in &words {

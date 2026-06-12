@@ -1,1 +1,8 @@
 target
+
+# Tauri's generated schemas (regenerated on build)
+cha-gui/src-tauri/gen/
+
+# Word list (supplied locally). The CLI loads it at runtime and the GUI embeds
+# it at build time, so place it at the repo root.
+words.txt

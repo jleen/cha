@@ -2,7 +2,7 @@
 
 ## Performance requirements
 
-`cha` searches ~270k words (CSW2019) per query, and has ambitions to search
+`cha` searches ~270k words per query, and has ambitions to search
 even larger (>10M words) lists. Matching must be fast enough to feel
 instantaneous on a modern laptop. Current release-build baselines:
 
@@ -37,6 +37,31 @@ not chars) is the right function to call from the anagram closure. `count_chars`
 `compile_pattern`, `test_word` borrows the original word when neither the
 pattern nor the word contains punctuation — the common case for a Scrabble
 wordlist. Allocation only happens when stripping is actually needed.
+
+## Pattern compilation is fallible
+
+`compile_pattern` returns `Result<Matcher, PatternError>`. All failure modes
+(unclosed `[`/`(`, invalid regex, meaningless characters) are detected at
+**compile time** — the returned matcher closures never fail. Keep it that way:
+the per-word hot path must stay panic- and `Result`-free. The CLI handles the
+`Err` (interactive mode re-prompts instead of crashing); the GUI maps it to a
+string shown in the UI.
+
+## GUI (`cha-gui`, Tauri v2)
+
+- The GUI is a separate workspace member that reuses `cha-core`. The front end
+  is **vanilla HTML/JS/CSS with no bundler** — `withGlobalTauri: true` exposes
+  `window.__TAURI__.core.invoke`, so there is no Node/npm step. Don't introduce
+  a JS framework or build tool without a strong reason.
+- **The word list is embedded via `include_str!("../../../words.txt")`**, so
+  `words.txt` must exist at the repo root for the GUI to compile. The `search`
+  command caps returned matches at `MAX_RESULTS` (5000) but reports the true
+  total, so a pattern like `*` can't flood the DOM.
+- **`time` is pinned to `=0.3.47`** in `cha-gui/src-tauri/Cargo.toml`. 0.3.48
+  trips an E0119 coherence false-positive (rust-lang/rust#100712) against
+  `cookie 0.18.1` under rustc 1.96; 0.3.47 still satisfies plist's `^0.3.47`.
+  Don't drop the pin (or let `cargo update` move it) until tauri/cookie or rustc
+  resolves it.
 
 ## What to avoid
 

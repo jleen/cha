@@ -10,8 +10,8 @@ cha <pattern> [-w wordlist] [-b bench_count]
 cha -i        [-w wordlist]
 ```
 
-By default, `cha` looks for `csw2019.txt` (Collins Scrabble Words 2019) in the
-current directory. Pass `-w` to use a different file.
+By default, `cha` looks for `words.txt` in the current directory. Pass `-w` to
+use a different file.
 
 Output is displayed in columns when writing to a terminal, or one word per line
 when piped.
@@ -86,6 +86,38 @@ cargo build --release
 ```
 
 The binary ends up at `target/release/cha`.
+
+## GUI
+
+A desktop GUI (built with [Tauri](https://tauri.app/)) lives in `cha-gui/`. It
+shares the same `cha-core` search engine and offers a pattern box with a live,
+scrolling list of results. The same pattern language as the CLI applies.
+
+### Building and running the GUI
+
+Requires the Tauri CLI (no Node.js needed — the front end is plain
+HTML/JS/CSS):
+
+```
+cargo install tauri-cli --version "^2"
+```
+
+On Linux, the WebKit webview also needs system packages, e.g. on Debian/Ubuntu:
+`libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev build-essential libssl-dev`.
+Windows (WebView2) and macOS (WKWebView) need no extra packages.
+
+Run the Tauri commands from inside the GUI crate:
+
+```
+cd cha-gui/src-tauri
+cargo tauri dev      # run in development
+cargo tauri build    # produce a release bundle
+```
+
+`cargo tauri build` produces a platform-appropriate **Cha** app —
+`Cha.exe`/MSI on Windows, `Cha.app`/dmg on macOS, AppImage/deb on Linux — under
+`cha-gui/src-tauri/target/release/bundle/`. For a quick dev build without the
+Tauri CLI, `cargo build -p cha-gui` works from anywhere in the workspace.
 
 ## Benchmarking
 

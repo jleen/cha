@@ -1,5 +1,5 @@
 [workspace]
-members = ["cha-core"]
+members = ["cha-core", "cha-gui/src-tauri"]
 
 [package]
 name = "cha"
