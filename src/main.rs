@@ -1,5 +1,5 @@
-mod dictionary;
-mod pattern;
+use cha_core::dictionary;
+use cha_core::pattern;
 
 use clap::Parser;
 use rustyline::DefaultEditor;

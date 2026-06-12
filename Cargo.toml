@@ -1,3 +1,6 @@
+[workspace]
+members = ["cha-core"]
+
 [package]
 name = "cha"
 version = "0.1.0"
@@ -8,7 +11,7 @@ name = "cha"
 path = "src/main.rs"
 
 [dependencies]
+cha-core = { path = "cha-core" }
 clap = { version = "4", features = ["derive"] }
-fancy-regex = "0"
 rustyline = "14"
 terminal_size = "0"

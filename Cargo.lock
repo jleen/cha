@@ -95,13 +95,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
-name = "char"
+name = "cha"
 version = "0.1.0"
 dependencies = [
+ "cha-core",
  "clap",
- "fancy-regex",
  "rustyline",
  "terminal_size",
+]
+
+[[package]]
+name = "cha-core"
+version = "0.1.0"
+dependencies = [
+ "fancy-regex",
 ]
 
 [[package]]
