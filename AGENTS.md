@@ -1,4 +1,4 @@
-# Implementation notes for char
+# Implementation notes for cha
 
 ## Performance requirements
 

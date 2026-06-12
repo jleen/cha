@@ -1,10 +1,10 @@
 [package]
-name = "char"
+name = "cha"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "char"
+name = "cha"
 path = "src/main.rs"
 
 [dependencies]
