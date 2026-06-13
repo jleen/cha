@@ -119,6 +119,19 @@ cargo tauri build    # produce a release bundle
 `cha-gui/src-tauri/target/release/bundle/`. For a quick dev build without the
 Tauri CLI, `cargo build -p cha-gui` works from anywhere in the workspace.
 
+### Word list
+
+When `words.txt` is present at the repo root at build time, the GUI embeds it
+directly in the binary, so the app is fully self-contained. If `words.txt` is
+absent at build time, the GUI instead loads it at runtime from the app config
+directory:
+
+- Linux: `~/.config/org.saturnvalley.cha/words.txt`
+- macOS: `~/Library/Application Support/org.saturnvalley.cha/words.txt`
+- Windows: `%APPDATA%\org.saturnvalley.cha\words.txt`
+
+If no file is found there, the app still opens with an empty word list.
+
 ## Benchmarking
 
 Pass `-b N` to run the matcher N times and report throughput — useful for

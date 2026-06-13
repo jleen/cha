@@ -53,10 +53,16 @@ string shown in the UI.
   is **vanilla HTML/JS/CSS with no bundler** — `withGlobalTauri: true` exposes
   `window.__TAURI__.core.invoke`, so there is no Node/npm step. Don't introduce
   a JS framework or build tool without a strong reason.
-- **The word list is embedded via `include_str!("../../../words.txt")`**, so
-  `words.txt` must exist at the repo root for the GUI to compile. The `search`
-  command caps returned matches at `MAX_RESULTS` (5000) but reports the true
-  total, so a pattern like `*` can't flood the DOM.
+- **The word list is embedded via `include_str!` when `words.txt` is present at
+  the repo root at build time** (the usual case). `build.rs` gates the embed
+  behind a `words_embedded` cfg, so when the file is absent the GUI still
+  compiles and instead loads `words.txt` from the app config dir at runtime
+  (e.g. `~/.config/org.saturnvalley.cha/words.txt`); a missing or unreadable
+  file there leaves an empty dictionary rather than aborting. The cfg can't be a
+  runtime `if` — `include_str!` expands unconditionally — which is why the
+  decision lives in `build.rs`. The `search` command caps returned matches at
+  `MAX_RESULTS` (5000) but reports the true total, so a pattern like `*` can't
+  flood the DOM.
 - **`time` is pinned to `=0.3.47`** in `cha-gui/src-tauri/Cargo.toml`. 0.3.48
   trips an E0119 coherence false-positive (rust-lang/rust#100712) against
   `cookie 0.18.1` under rustc 1.96; 0.3.47 still satisfies plist's `^0.3.47`.
