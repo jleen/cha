@@ -130,7 +130,8 @@ directory:
 - macOS: `~/Library/Application Support/org.saturnvalley.cha/words.txt`
 - Windows: `%APPDATA%\org.saturnvalley.cha\words.txt`
 
-If no file is found there, the app still opens with an empty word list.
+If no file is found there, the app still opens but shows a notice naming the
+exact path where it expects `words.txt`, so you know where to put one.
 
 ## Benchmarking
 

@@ -21,6 +21,11 @@ const MAX_RESULTS: usize = 5000;
 
 struct Dict {
     words: Vec<String>,
+    /// A user-facing message (naming the exact path the word list should live
+    /// at) when no list could be loaded, or `None` when the list is available.
+    /// The front end shows this on startup so an empty result area isn't
+    /// mistaken for "no matches".
+    error: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -49,28 +54,44 @@ fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, Str
     Ok(SearchResult { matches, total })
 }
 
+/// Returns a user-facing message when no word list could be loaded, else `None`.
+/// The front end calls this on startup to show a notice naming the expected path.
+#[tauri::command]
+fn dict_status(dict: tauri::State<Dict>) -> Option<String> {
+    dict.error.clone()
+}
+
 /// Build the dictionary from the embedded list when present, otherwise from
 /// `words.txt` in the app's config dir (e.g. `~/.config/org.saturnvalley.cha/`
 /// on Linux). A missing or unreadable runtime file yields an empty dictionary
 /// rather than aborting, so the GUI still opens.
 fn load_dict(app: &tauri::App) -> Dict {
     if let Some(text) = EMBEDDED_WORDS {
-        return Dict { words: dictionary::load_words_from_str(text) };
+        return Dict { words: dictionary::load_words_from_str(text), error: None };
     }
-    let words = match app.path().app_config_dir() {
+    match app.path().app_config_dir() {
         Ok(dir) => {
             let path = dir.join("words.txt");
-            dictionary::load_words(&path.to_string_lossy()).unwrap_or_else(|e| {
-                eprintln!("Cha: could not read {}: {e}", path.display());
-                Vec::new()
-            })
+            match dictionary::load_words(&path.to_string_lossy()) {
+                Ok(words) => Dict { words, error: None },
+                Err(e) => {
+                    eprintln!("Cha: could not read {}: {e}", path.display());
+                    let msg = format!(
+                        "No word list found.\n\nPlace a words.txt file here:\n{}",
+                        path.display()
+                    );
+                    Dict { words: Vec::new(), error: Some(msg) }
+                }
+            }
         }
         Err(e) => {
             eprintln!("Cha: no config dir available ({e}); starting with an empty word list");
-            Vec::new()
+            let msg = "No word list found, and the app config directory could \
+                       not be located on this system."
+                .to_string();
+            Dict { words: Vec::new(), error: Some(msg) }
         }
-    };
-    Dict { words }
+    }
 }
 
 fn main() {
@@ -80,7 +101,7 @@ fn main() {
             app.manage(dict);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![search])
+        .invoke_handler(tauri::generate_handler![search, dict_status])
         .run(tauri::generate_context!())
         .expect("error while running Cha");
 }

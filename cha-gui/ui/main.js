@@ -8,6 +8,21 @@ const status = document.querySelector("#status");
 
 let timer;
 
+// On startup, ask the backend whether a word list is available. If not, show a
+// friendly notice (with the exact path the file belongs at) and disable input,
+// so an empty result area isn't mistaken for "no matches".
+async function checkDict() {
+  const message = await invoke("dict_status");
+  if (!message) return;
+  input.disabled = true;
+  input.placeholder = "Word list unavailable";
+  const notice = document.createElement("div");
+  notice.className = "notice";
+  notice.textContent = message;
+  results.replaceChildren(notice);
+}
+checkDict();
+
 input.addEventListener("input", () => {
   clearTimeout(timer);
   timer = setTimeout(run, 100); // debounce keystrokes

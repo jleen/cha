@@ -58,9 +58,12 @@ string shown in the UI.
   behind a `words_embedded` cfg, so when the file is absent the GUI still
   compiles and instead loads `words.txt` from the app config dir at runtime
   (e.g. `~/.config/org.saturnvalley.cha/words.txt`); a missing or unreadable
-  file there leaves an empty dictionary rather than aborting. The cfg can't be a
-  runtime `if` — `include_str!` expands unconditionally — which is why the
-  decision lives in `build.rs`. The `search` command caps returned matches at
+  file there leaves an empty dictionary rather than aborting. In that case the
+  `dict_status` command returns a user-facing message naming the expected path,
+  which the front end shows as a notice on startup (and disables input) so an
+  empty result area isn't mistaken for "no matches". The cfg can't be a runtime
+  `if` — `include_str!` expands unconditionally — which is why the decision
+  lives in `build.rs`. The `search` command caps returned matches at
   `MAX_RESULTS` (5000) but reports the true total, so a pattern like `*` can't
   flood the DOM.
 - **`time` is pinned to `=0.3.47`** in `cha-gui/src-tauri/Cargo.toml`. 0.3.48

@@ -71,3 +71,19 @@ header {
 .word {
   padding: 1px 0;
 }
+
+.notice {
+  margin: 24px auto;
+  max-width: 32em;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--error);
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: var(--fg);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
