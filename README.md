@@ -1,52 +1,69 @@
-# cha
+# Cha 茶
 
-A fast word-search tool for crosswords, Scrabble, and other word games.
-Searches a word list using a concise pattern language.
+Cha 茶 is a pattern-matching and anagramming word tool intended to assist
+in solving cryptic crosswords, acrostics, and other such word puzzles.
+Cha understands a pattern language based on Ross Beresford’s classic
+TEA Crossword Helper.
 
-## Usage
+Cha is provided as a cross-platform GUI application that will run on Mac OS,
+Windows, and Linux; as well as a CLI tool that will run on pretty much anything
+that Rust can target.  In addition, the core pattern matcher is provided as a
+standalone crate.
+
+## Word list
+
+No word list is provided. You’ll need to procure your own word list and provide
+it as a text file called `words.txt`, one lowercase word per line.
+
+If you provide `words.txt` at compile time, it will be compiled into the GUI
+application and bundled with it.  Otherwise, you’ll need to provide a
+`words.txt` at run time.
+
+## GUI usage
+
+Just install and run the application. If `words.txt` is not found,
+you’ll see a message telling you where to put it.
+
+## CLI usage
 
 ```
 cha <pattern> [-w wordlist] [-b bench_count]
 cha -i        [-w wordlist]
 ```
 
-By default, `cha` looks for `words.txt` in the current directory. Pass `-w` to
-use a different file.
+By default, `cha` loads its word list from `./words.txt`. Specify a different
+word list with `-w`.
 
-Output is displayed in columns when writing to a terminal, or one word per line
-when piped.
+Either specify a pattern on the command line, or pass `-i` / `--interactive` to
+enter an interactive loop which will repeatedly prompt for a pattern and return
+results.  Enter `^D` on an empty line to exit.
 
-### Interactive mode
-
-Pass `-i` / `--interactive` to enter a read-eval-print loop. `cha` prompts for
-a pattern, shows results, then prompts again. The prompt supports readline-style
-line editing and history recall (up/down arrows). Exit with `^D` on an empty
-line.
-
-## Pattern language
-
-### Templates
-
-Match words by position:
+## Patterns
 
 | Token | Meaning |
 |-------|---------|
-| `.` | Any single letter |
+| `.` | One letter |
 | `*` | Zero or more letters |
-| `@` | Any vowel (a e i o u) |
-| `#` | Any consonant |
+| `@` | A vowel (a e i o u) |
+| `#` | A consonant |
 | `[abc]` | One letter from the set |
 | `a`–`z` | Literal letter (case-insensitive) |
-| `-` `'` ` ` | Literal punctuation |
-| `1`–`9` | Backreference variable — first use captures, subsequent uses must match |
+| `-` `'` ` ` | Punctuation (see below) |
+| `1`–`9` | Same letter as other occurences of that digit|
 
-Examples:
+### Punctuation
+
+Punctuation in the word list is ignored, unless punctuation is provided
+in the pattern. If the pattern is punctuated then the word must match the
+punctuation.
+
+### Examples
 
 ```
-cha '.y...l'        # HYMNAL, SYMBOL, …
-cha '@#@#@#@#@#@'   # alternating vowel/consonant, 11 letters
-cha '1234321'       # palindromes (DEIFIED, RACECAR, …)
-cha '...-..-.....`  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)
+.y...l        # HYMNAL, SYMBOL, …
+@#@#@#@#@#@   # alternating vowel/consonant, 11 letters
+1234321       # palindromes (DEIFIED, RACECAR, …)
+...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)
 ```
 
 ### Anagrams
@@ -55,88 +72,58 @@ A semicolon introduces an anagram pool. Letters before `;` are a template;
 letters after `;` are the pool.
 
 ```
-cha ';ilphone'          # anagrams of ILPHONE → PINHOLE, …
-cha ';..exit'           # anagrams of 6 letters including EXIT + 2 wildcards
-cha ';doodle[ac][rn]'   # pool DOODLE plus either A or C, and R or N
-cha 't....;intra'       # starts with T, is an anagram of INTRA
-cha ';(che)rostra'      # anagram of CHEROST RA that contains CHE contiguously
+;ilphone          # anagram of ILPHONE → PINHOLE, …
+;..exit           # anagram of EXIT + 2 wildcards
+;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
+t....;intra       # starts with T, is an anagram of INTRA
+;(che)rostra      # anagram of CHEROST RA that contains CHE exactly
 ```
 
-**Template + anagram (hybrid):** letters in the template are counted as part of
-the pool. `cha 'z....;brae'` matches ZEBRA because the Z is already in the
-template.
+### Logic
 
-**Wildcards in anagram:** `.` is a blank tile (any letter), `*` allows extra
-letters beyond the pool.
-
-### Combining patterns
-
-Use `&` to AND patterns and `!` to negate:
+Use `&` to combine patterns and `!` to negate:
 
 ```
-cha 'c.. & *at'          # three-letter word starting with C and ending in AT
-cha ';intra & ! *a'      # anagram match but not ending in -A
-cha '!c* & !*t'          # doesn't start with C, doesn't end in T
+c.. & *at          # three-letter word starting with C and ending in AT
+;intra & ! *a      # anagram match but not ending in -A
+!c* & !*t          # doesn't start with C, doesn't end in T
 ```
 
 ## Building
+
+### CLI
 
 ```
 cargo build --release
 ```
 
-The binary ends up at `target/release/cha`.
+The CLI is built at `target/release/cha`.
 
-## GUI
+### GUI
 
-A desktop GUI (built with [Tauri](https://tauri.app/)) lives in `cha-gui/`. It
-shares the same `cha-core` search engine and offers a pattern box with a live,
-scrolling list of results. The same pattern language as the CLI applies.
-
-### Building and running the GUI
-
-Requires the Tauri CLI (no Node.js needed — the front end is plain
-HTML/JS/CSS):
+The GUI uses [Tauri](https://tauri.app/). Install the Tauri build tool with
 
 ```
-cargo install tauri-cli --version "^2"
+cargo install tauri-cli
 ```
 
-On Linux, the WebKit webview also needs system packages, e.g. on Debian/Ubuntu:
-`libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev build-essential libssl-dev`.
-Windows (WebView2) and macOS (WKWebView) need no extra packages.
+On Linux you’ll need to install Tauri’s dependencies. On a Debian-based distro,
+something like
+`apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev build-essential libssl-dev` should do the trick.
 
-Run the Tauri commands from inside the GUI crate:
+Once Tauri and its dependencies are installed, you can build from the project
+root:
 
 ```
-cd cha-gui/src-tauri
-cargo tauri dev      # run in development
-cargo tauri build    # produce a release bundle
+cargo tauri dev      # run a debug build
+cargo tauri build    # compile and package a release build
 ```
-
-`cargo tauri build` produces a platform-appropriate **Cha** app —
-`Cha.exe`/MSI on Windows, `Cha.app`/dmg on macOS, AppImage/deb on Linux — under
-`cha-gui/src-tauri/target/release/bundle/`. For a quick dev build without the
-Tauri CLI, `cargo build -p cha-gui` works from anywhere in the workspace.
-
-### Word list
-
-When `words.txt` is present at the repo root at build time, the GUI embeds it
-directly in the binary, so the app is fully self-contained. If `words.txt` is
-absent at build time, the GUI instead loads it at runtime from the app config
-directory:
-
-- Linux: `~/.config/org.saturnvalley.cha/words.txt`
-- macOS: `~/Library/Application Support/org.saturnvalley.cha/words.txt`
-- Windows: `%APPDATA%\org.saturnvalley.cha\words.txt`
-
-If no file is found there, the app still opens but shows a notice naming the
-exact path where it expects `words.txt`, so you know where to put one.
 
 ## Benchmarking
 
-Pass `-b N` to run the matcher N times and report throughput — useful for
-profiling pattern changes:
+The CLI supports a benchmarking mode that will load the dictionary once and
+do a word search repeatedly, for performance profiling purposes.
+Pass `-b N` to run the matcher N times and report the elapsed time:
 
 ```
 cha ';..exit' -b 1000
