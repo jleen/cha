@@ -46,7 +46,11 @@ pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
         };
         matchers.iter().all(|(negate, m)| {
             let result = m(&test_word);
-            if *negate { !result } else { result }
+            if *negate {
+                !result
+            } else {
+                result
+            }
         })
     }))
 }
@@ -67,7 +71,9 @@ fn compile_template(template: &str) -> Result<Matcher, PatternError> {
     let regex_str = template_to_regex(template)?;
     let re = Regex::new(&format!("(?i)^{}$", regex_str))
         .map_err(|e| PatternError(format!("Invalid template '{}': {}", template, e)))?;
-    Ok(Box::new(move |word: &str| re.is_match(word).unwrap_or(false)))
+    Ok(Box::new(move |word: &str| {
+        re.is_match(word).unwrap_or(false)
+    }))
 }
 
 fn escape_in_char_class(c: char) -> String {
@@ -91,7 +97,9 @@ fn template_to_regex(template: &str) -> Result<String, PatternError> {
             '@' => out.push_str("[aeiou]"),
             '#' => out.push_str("[bcdfghjklmnpqrstvwxyz]"),
             '[' => {
-                let rel = chars[i..].iter().position(|&x| x == ']')
+                let rel = chars[i..]
+                    .iter()
+                    .position(|&x| x == ']')
                     .ok_or_else(|| PatternError("Unclosed '[' in template".to_string()))?;
                 let j = i + rel;
                 out.push('[');
@@ -115,11 +123,14 @@ fn template_to_regex(template: &str) -> Result<String, PatternError> {
                 out.push(c);
             }
             c if c.is_alphabetic() => {
-                out.push_str(&fancy_regex::escape(
-                    &c.to_lowercase().to_string(),
-                ));
+                out.push_str(&fancy_regex::escape(&c.to_lowercase().to_string()));
             }
-            c => return Err(PatternError(format!("Template has meaningless character '{}'", c))),
+            c => {
+                return Err(PatternError(format!(
+                    "Template has meaningless character '{}'",
+                    c
+                )))
+            }
         }
         i += 1;
     }
@@ -176,14 +187,18 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
     while i < chars.len() {
         match chars[i] {
             '[' => {
-                let rel = chars[i..].iter().position(|&x| x == ']')
+                let rel = chars[i..]
+                    .iter()
+                    .position(|&x| x == ']')
                     .ok_or_else(|| PatternError("Unclosed '[' in anagram".to_string()))?;
                 let j = i + rel;
                 choices.push(chars[i + 1..j].to_vec());
                 i = j;
             }
             '(' => {
-                let rel = chars[i..].iter().position(|&x| x == ')')
+                let rel = chars[i..]
+                    .iter()
+                    .position(|&x| x == ')')
                     .ok_or_else(|| PatternError("Unclosed '(' in anagram".to_string()))?;
                 let j = i + rel;
                 let sp: String = chars[i + 1..j].iter().collect::<String>().to_lowercase();
@@ -196,7 +211,12 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
             c if c.is_alphabetic() => {
                 fixed_letters.push(c.to_lowercase().next().unwrap());
             }
-            c => return Err(PatternError(format!("Anagram has meaningless character '{}'", c))),
+            c => {
+                return Err(PatternError(format!(
+                    "Anagram has meaningless character '{}'",
+                    c
+                )))
+            }
         }
         i += 1;
     }
@@ -221,13 +241,16 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
     let fixed_counter = count_chars(&fixed_letters);
     let fixed_size = fixed_letters.len();
     let template_counter = count_chars(&template_letters);
-    let combo_pools: Vec<([usize; 26], usize)> = choice_combos.iter().map(|combo| {
-        let mut counter = fixed_counter;
-        for &c in combo {
-            counter[(c.to_ascii_lowercase() as u8 - b'a') as usize] += 1;
-        }
-        (counter, fixed_size + combo.len())
-    }).collect();
+    let combo_pools: Vec<([usize; 26], usize)> = choice_combos
+        .iter()
+        .map(|combo| {
+            let mut counter = fixed_counter;
+            for &c in combo {
+                counter[(c.to_ascii_lowercase() as u8 - b'a') as usize] += 1;
+            }
+            (counter, fixed_size + combo.len())
+        })
+        .collect();
 
     Ok(Box::new(move |word: &str| {
         if let Some(ref tm) = template_matcher {

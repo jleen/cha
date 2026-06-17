@@ -38,7 +38,10 @@ struct SearchResult {
 fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, String> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
-        return Ok(SearchResult { matches: vec![], total: 0 });
+        return Ok(SearchResult {
+            matches: vec![],
+            total: 0,
+        });
     }
     let matcher = pattern::compile_pattern(pattern).map_err(|e| e.to_string())?;
     let mut total = 0usize;
@@ -67,7 +70,10 @@ fn dict_status(dict: tauri::State<Dict>) -> Option<String> {
 /// rather than aborting, so the GUI still opens.
 fn load_dict(app: &tauri::App) -> Dict {
     if let Some(text) = EMBEDDED_WORDS {
-        return Dict { words: dictionary::load_words_from_str(text), error: None };
+        return Dict {
+            words: dictionary::load_words_from_str(text),
+            error: None,
+        };
     }
     match app.path().app_config_dir() {
         Ok(dir) => {
@@ -80,7 +86,10 @@ fn load_dict(app: &tauri::App) -> Dict {
                         "No word list found.\n\nPlace a words.txt file here:\n{}",
                         path.display()
                     );
-                    Dict { words: Vec::new(), error: Some(msg) }
+                    Dict {
+                        words: Vec::new(),
+                        error: Some(msg),
+                    }
                 }
             }
         }
@@ -89,7 +98,10 @@ fn load_dict(app: &tauri::App) -> Dict {
             let msg = "No word list found, and the app config directory could \
                        not be located on this system."
                 .to_string();
-            Dict { words: Vec::new(), error: Some(msg) }
+            Dict {
+                words: Vec::new(),
+                error: Some(msg),
+            }
         }
     }
 }
