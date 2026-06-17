@@ -66,7 +66,7 @@ fn print_columns(words: &[&str]) {
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     for row in 0..nrows {
-        for col in 0..ncols {
+        for (col, col_width) in col_widths.iter().enumerate() {
             let idx = col * nrows + row;
             if idx >= words.len() {
                 break;
@@ -77,7 +77,7 @@ fn print_columns(words: &[&str]) {
             let word = words[idx];
             out.write_all(word.as_bytes()).unwrap();
             if col + 1 < ncols && idx + nrows < words.len() {
-                let pad = col_widths[col] - word.len();
+                let pad = col_width - word.len();
                 for _ in 0..pad {
                     out.write_all(b" ").unwrap();
                 }

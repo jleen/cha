@@ -111,11 +111,11 @@ fn template_to_regex(template: &str) -> Result<String, PatternError> {
             }
             c if c.is_ascii_digit() => {
                 let name = format!("v{}", c);
-                if seen_vars.contains_key(&c) {
-                    out.push_str(&format!("(?P={})", name));
-                } else {
-                    seen_vars.insert(c, true);
+                if let std::collections::hash_map::Entry::Vacant(e) = seen_vars.entry(c) {
+                    e.insert(true);
                     out.push_str(&format!("(?P<{}>[a-z])", name));
+                } else {
+                    out.push_str(&format!("(?P={})", name));
                 }
             }
             c @ ('-' | '\'' | ' ') => {
