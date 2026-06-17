@@ -252,31 +252,31 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
         })
         .collect();
 
-    Ok(Box::new(move |word: &str| {
+    Ok(Box::new(move |candidate: &str| {
         if let Some(ref tm) = template_matcher {
-            if !tm(word) {
+            if !tm(candidate) {
                 return false;
             }
         }
 
-        let (word_counter, word_len) = count_str(word);
+        let (candidate_counter, candidate_len) = count_str(candidate);
 
         'combo: for (pool_counter, pool_base) in &combo_pools {
             let pool_size = pool_base + num_wildcards;
 
-            if is_pure && !has_star && word_len != pool_size {
+            if is_pure && !has_star && candidate_len != pool_size {
                 continue;
             }
 
             if is_pure {
                 for i in 0..26 {
-                    if pool_counter[i] > 0 && word_counter[i] < pool_counter[i] {
+                    if pool_counter[i] > 0 && candidate_counter[i] < pool_counter[i] {
                         continue 'combo;
                     }
                 }
 
                 let extras: usize = (0..26)
-                    .map(|i| word_counter[i].saturating_sub(pool_counter[i]))
+                    .map(|i| candidate_counter[i].saturating_sub(pool_counter[i]))
                     .sum();
 
                 if !has_star && extras != num_wildcards {
@@ -285,23 +285,41 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
             } else {
                 // Hybrid: full_counter[x] = max(template_count[x], pool_count[x])
                 // This models template letters being implicitly in the anagram pool.
-                let mut full_counter = template_counter;
+                // Note that a star wildcard in the anagram pool means nothing in this case.
+                // (The only thing it *could* mean is "ignore the anagram and do what you like",
+                // which isn't very interesting.)
+                let mut anagram_counter = template_counter;
                 for i in 0..26 {
-                    if pool_counter[i] > full_counter[i] {
-                        full_counter[i] = pool_counter[i];
+                    if pool_counter[i] > anagram_counter[i] {
+                        anagram_counter[i] = pool_counter[i];
                     }
                 }
 
-                let extras: usize = (0..26)
-                    .map(|i| word_counter[i].saturating_sub(full_counter[i]))
-                    .sum();
+                // Check for letters in the candidate that aren't in the anagram pool,
+                // and vice versa.
+                let mut in_candidate_but_not_pool: usize = 0;
+                let mut in_pool_but_not_candidate: usize = 0;
+                for i in 0..26 {
+                    in_pool_but_not_candidate +=
+                        candidate_counter[i].saturating_sub(anagram_counter[i]);
+                    in_candidate_but_not_pool +=
+                        anagram_counter[i].saturating_sub(candidate_counter[i]);
+                }
 
-                if !has_star && extras > num_wildcards {
+                // The candidate has to use all the pool letters (a longer word)
+                // or it has to use *only* pool letters (a shorter word).
+                // Wildcards license a deviation from either criterion.
+                if in_candidate_but_not_pool > num_wildcards
+                    && in_pool_but_not_candidate > num_wildcards
+                {
                     continue;
                 }
             }
 
-            if !sub_patterns.iter().all(|sp| word.contains(sp.as_str())) {
+            if !sub_patterns
+                .iter()
+                .all(|sp| candidate.contains(sp.as_str()))
+            {
                 continue;
             }
 
@@ -405,6 +423,21 @@ mod tests {
     }
 
     #[test]
+    fn test_anagram_flexible_length() {
+        let m = compile_pattern("obel*;ski.").unwrap();
+        assert!(m("obelisk"));
+        assert!(m("obeliskoid"));
+        assert!(m("obelisks"));
+    }
+
+    #[test]
+    fn test_anagram_underspecified() {
+        let m = compile_pattern(".......;lobi").unwrap();
+        assert!(m("abolish"));
+        assert!(m("obelisk"));
+    }
+
+    #[test]
     fn test_anagram_with_wildcards() {
         let m = compile_pattern(";..oting").unwrap();
         assert!(m("tonight"));
@@ -435,13 +468,13 @@ mod tests {
     }
 
     #[test]
-    fn test_template_with_anagram() {
-        let m = compile_pattern("......*;gdangboot").unwrap();
+    fn test_hybrid_unused_pool_letters() {
+        let m = compile_pattern("........;gdangboot").unwrap();
         assert!(m("toboggan"));
     }
 
     #[test]
-    fn test_hybrid_unused_pool_letters() {
+    fn test_hybrid_star_unused_pool_letters() {
         let m = compile_pattern("......*;gdangboot").unwrap();
         assert!(m("toboggan"));
     }
@@ -459,9 +492,31 @@ mod tests {
     }
 
     #[test]
+    fn test_hybrid_short_pattern() {
+        let m = compile_pattern("....*;gdangboot").unwrap();
+        assert!(m("toad"));
+        assert!(m("toboggan"));
+        assert!(m("tobogganed"));
+        assert!(!m("aeon"));
+        assert!(!m("xxxx"));
+    }
+
+    #[test]
+    fn test_hybrid_short_pattern_with_wildcard() {
+        let m = compile_pattern("....*;gdangboot.").unwrap();
+        assert!(m("toad"));
+        assert!(m("toboggan"));
+        assert!(m("tobogganed"));
+        assert!(m("aeon"));
+        assert!(!m("xxxx"));
+    }
+
+    #[test]
     fn test_hybrid_wrong_letters() {
         let m = compile_pattern("......*;gdangboot").unwrap();
         assert!(!m("xxxxxxxx"));
+        assert!(!m("claggy"));
+        assert!(!m("chemicals"));
     }
 
     #[test]
