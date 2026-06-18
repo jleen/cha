@@ -72,6 +72,13 @@ header {
   padding: 1px 0;
 }
 
+/* Faint, smaller pool-difference annotation, inline to the right of the word. */
+.word-annot {
+  color: var(--muted);
+  font-size: 0.8em;
+  margin-left: 0.6em;
+}
+
 .notice {
   margin: 24px auto;
   max-width: 32em;

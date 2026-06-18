@@ -48,10 +48,21 @@ async function run() {
 function render(matches, total) {
   status.classList.remove("error");
   const frag = document.createDocumentFragment();
-  for (const word of matches) {
+  for (const m of matches) {
     const row = document.createElement("div");
     row.className = "word";
-    row.textContent = word;
+    row.textContent = m.word;
+
+    const parts = [];
+    if (m.unused) parts.push(`−${m.unused}`); // −unused pool letters
+    if (m.extra) parts.push(`+${m.extra}`); // +letters not in pool
+    if (parts.length) {
+      const annot = document.createElement("span");
+      annot.className = "word-annot";
+      annot.textContent = parts.join(" ");
+      row.appendChild(annot);
+    }
+
     frag.appendChild(row);
   }
   results.replaceChildren(frag); // single bulk DOM swap

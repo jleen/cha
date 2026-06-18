@@ -99,14 +99,14 @@ fn run_pattern(pat: &str, words: &[String]) {
     if stdout.is_terminal() {
         let matches: Vec<&str> = words
             .iter()
-            .filter(|w| matcher(w))
+            .filter(|w| matcher(w).is_some())
             .map(String::as_str)
             .collect();
         print_columns(&matches);
     } else {
         let mut out = BufWriter::new(stdout.lock());
         for word in words {
-            if matcher(word) {
+            if matcher(word).is_some() {
                 writeln!(out, "{}", word).unwrap();
             }
         }

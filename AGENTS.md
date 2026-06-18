@@ -1,5 +1,23 @@
 # Implementation notes for cha
 
+## Building and checking
+
+Before committing, run all three and keep them clean:
+
+```
+cargo fmt
+cargo clippy --workspace
+cargo test
+```
+
+`cargo clippy` is treated as required here, not advisory — there are commits
+dedicated to keeping it warning-free (e.g. prefer the `?` operator over an
+`if x.is_none() { return None }`). `cargo fmt` likewise: the repo is kept
+fully rustfmt-formatted, so run it before committing rather than hand-aligning.
+The workspace has two members (`cha-core`, `cha-gui/src-tauri`) plus the CLI
+crate (`cha`) at the root; `--workspace` covers the libraries — build the GUI
+explicitly with `cargo build -p cha-gui` when touching it.
+
 ## Performance requirements
 
 `cha` searches ~270k words per query, and has ambitions to search
@@ -47,6 +65,25 @@ the per-word hot path must stay panic- and `Result`-free. The CLI handles the
 `Err` (interactive mode re-prompts instead of crashing); the GUI maps it to a
 string shown in the UI.
 
+## Matches carry optional detail (`MatchInfo`)
+
+`Matcher` is `Box<dyn Fn(&str) -> Option<MatchInfo>>`: `None` means no match,
+`Some(info)` means a match. `MatchInfo { unused, extra }` reports, for anagram
+matches, the pool letters the word leaves **unused** and the word letters
+**not in the pool** (both uppercased and sorted; empty when there's nothing to
+report — e.g. an exact anagram). It does **not** affect match validity; it's
+purely informational. The GUI renders it as a faint `−UNUSED +EXTRA` suffix to
+the right of each word ([`cha-gui/ui/main.js`](cha-gui/ui/main.js),
+`.word-annot` in [`styles.css`](cha-gui/ui/styles.css)); the CLI ignores it and
+just checks `.is_some()`.
+
+**Computing the letters is on the confirmed-match path only.** The `diff_letters`
+work in `compile_anagram` runs *after* all the fast reject checks pass, right
+before returning `Some(..)` — never for a word that fails to match. Keep it
+there: doing per-letter diffing for non-matches would regress the hot loop.
+Composition (`&`/`!`) folds each matched part's `MatchInfo` into the aggregate,
+but in practice only the single anagram part contributes anything.
+
 ## GUI (`cha-gui`, Tauri v2)
 
 - The GUI is a separate workspace member that reuses `cha-core`. The front end
@@ -74,8 +111,10 @@ string shown in the UI.
 
 ## What to avoid
 
-- Do not allocate `Vec<char>` or `String` inside the per-word anagram loop.
-  Allocations in that path are immediately measurable in benchmarks.
+- Do not allocate `Vec<char>` or `String` on the per-word *reject* path of the
+  anagram loop. Allocations there are immediately measurable in benchmarks. (The
+  `MatchInfo` strings built by `diff_letters` are fine — they only allocate once a
+  word has already been confirmed as a match, which is comparatively rare.)
 - Do not call `count_chars` inside the closure. Pool counters are pre-computed;
   only `count_str(word)` belongs inside the closure.
 - Do not replace `[usize; 26]` with `HashMap` in the character-counting code.

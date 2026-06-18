@@ -29,8 +29,17 @@ struct Dict {
 }
 
 #[derive(serde::Serialize)]
+struct MatchRow {
+    word: String,
+    /// Pool letters not used by the word, e.g. "D". Empty if none.
+    unused: String,
+    /// Word letters not in the pool, e.g. "HT". Empty if none.
+    extra: String,
+}
+
+#[derive(serde::Serialize)]
 struct SearchResult {
-    matches: Vec<String>,
+    matches: Vec<MatchRow>,
     total: usize,
 }
 
@@ -47,10 +56,14 @@ fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, Str
     let mut total = 0usize;
     let mut matches = Vec::new();
     for word in &dict.words {
-        if matcher(word) {
+        if let Some(info) = matcher(word) {
             total += 1;
             if matches.len() < MAX_RESULTS {
-                matches.push(word.clone());
+                matches.push(MatchRow {
+                    word: word.clone(),
+                    unused: info.unused,
+                    extra: info.extra,
+                });
             }
         }
     }
