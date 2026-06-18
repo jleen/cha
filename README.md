@@ -27,12 +27,12 @@ you’ll see a message telling you where to put it.
 ## CLI usage
 
 ```
-cha <pattern> [-w wordlist] [-b bench_count]
-cha -i        [-w wordlist]
+cha <pattern> [-d] [-w wordlist] [-b bench_count]
+cha -i        [-d] [-w wordlist]
 ```
 
 By default, `cha` loads its word list from `./words.txt`. Specify a different
-word list with `-w`.
+word list with `-w`.  Display added/dropped anagram letters with `-d`.
 
 Either specify a pattern on the command line, or pass `-i` / `--interactive` to
 enter an interactive loop which will repeatedly prompt for a pattern and return

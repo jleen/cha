@@ -84,6 +84,17 @@ there: doing per-letter diffing for non-matches would regress the hot loop.
 Composition (`&`/`!`) folds each matched part's `MatchInfo` into the aggregate,
 but in practice only the single anagram part contributes anything.
 
+**The CLI surfaces this behind `-d`/`--delta`** (off by default; applies to both
+one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
+(ASCII, mirroring the GUI). Two rendering rules matter:
+
+- In terminal multi-column mode the delta is grayed with `\x1b[90m`/`\x1b[0m`.
+  Those bytes are **not** display width, so `MatchItem::width()` excludes them and
+  the column layout pads on display width only — keep that split or columns will
+  misalign. The delta and word are ASCII, so `str::len()` equals column count.
+- In piped (non-terminal) single-column mode, **no terminal codes are emitted** —
+  the delta is appended as plain ` -UNUSED +EXTRA` so pipelines stay clean.
+
 ## GUI (`cha-gui`, Tauri v2)
 
 - The GUI is a separate workspace member that reuses `cha-core`. The front end
