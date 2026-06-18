@@ -369,6 +369,8 @@ checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 name = "cha"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "cha-core",
  "clap",
  "rustyline",

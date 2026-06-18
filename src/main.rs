@@ -3,7 +3,7 @@ use cha_core::pattern;
 
 use clap::Parser;
 use rustyline::DefaultEditor;
-use std::io::{BufWriter, IsTerminal, Write};
+use std::io::{IsTerminal, Write};
 use std::process;
 use std::time::Instant;
 use terminal_size::{terminal_size, Width};
@@ -26,10 +26,11 @@ struct Args {
     delta: bool,
 }
 
-/// ANSI codes used to gray out the delta annotation in terminal output. Only
-/// emitted in multi-column (terminal) mode, never in piped single-column output.
-const GRAY: &[u8] = b"\x1b[90m";
-const RESET: &[u8] = b"\x1b[0m";
+/// Style used to gray out the delta annotation. The escape codes are always
+/// emitted by `render`; the `anstream` sink in `run_pattern` strips them when
+/// color is not wanted (piped output, `NO_COLOR`, a dumb terminal, etc.).
+const DELTA_STYLE: anstyle::Style =
+    anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::BrightBlack)));
 
 /// One match plus its (possibly empty) formatted delta, e.g. `delta = "-D +HT"`.
 struct MatchItem<'a> {
@@ -63,18 +64,19 @@ impl<'a> MatchItem<'a> {
             }
     }
 
-    /// Write the rendered cell, graying the delta when `color` is set.
-    fn render(&self, out: &mut impl Write, color: bool) {
-        out.write_all(self.word.as_bytes()).unwrap();
+    /// Write the rendered cell. The delta is always styled gray; the `anstream`
+    /// sink decides whether the escape codes survive.
+    fn render(&self, out: &mut impl Write) {
+        write!(out, "{}", self.word).unwrap();
         if !self.delta.is_empty() {
-            out.write_all(b" ").unwrap();
-            if color {
-                out.write_all(GRAY).unwrap();
-            }
-            out.write_all(self.delta.as_bytes()).unwrap();
-            if color {
-                out.write_all(RESET).unwrap();
-            }
+            write!(
+                out,
+                " {}{}{}",
+                DELTA_STYLE.render(),
+                self.delta,
+                DELTA_STYLE.render_reset()
+            )
+            .unwrap();
         }
     }
 }
@@ -92,7 +94,7 @@ fn format_delta(info: &pattern::MatchInfo) -> String {
     parts.join(" ")
 }
 
-fn print_columns(items: &[MatchItem], color: bool) {
+fn print_columns(items: &[MatchItem], out: &mut impl Write) {
     if items.is_empty() {
         return;
     }
@@ -133,8 +135,6 @@ fn print_columns(items: &[MatchItem], color: bool) {
         })
         .collect();
 
-    let stdout = std::io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
     for row in 0..nrows {
         for (col, col_width) in col_widths.iter().enumerate() {
             let idx = col * nrows + row;
@@ -145,7 +145,7 @@ fn print_columns(items: &[MatchItem], color: bool) {
                 out.write_all(b"  ").unwrap();
             }
             let item = &items[idx];
-            item.render(&mut out, color);
+            item.render(out);
             if col + 1 < ncols && idx + nrows < items.len() {
                 let pad = col_width - item.width();
                 for _ in 0..pad {
@@ -165,24 +165,29 @@ fn run_pattern(pat: &str, words: &[String], delta: bool) {
             return;
         }
     };
-    let stdout = std::io::stdout();
-    if stdout.is_terminal() {
-        // Terminal: multi-column, deltas grayed out when enabled.
-        let items: Vec<MatchItem> = words
-            .iter()
-            .filter_map(|w| matcher(w).map(|info| MatchItem::new(w, &info, delta)))
-            .collect();
-        print_columns(&items, delta);
+    let raw = std::io::stdout();
+    // anstream resolves the color policy (tty detection, NO_COLOR, CLICOLOR,
+    // TERM, CI) and strips the style codes from `render` when color isn't wanted.
+    let choice = anstream::AutoStream::choice(&raw);
+    let columns = raw.is_terminal();
+
+    let items: Vec<MatchItem> = words
+        .iter()
+        .filter_map(|w| matcher(w).map(|info| MatchItem::new(w, &info, delta)))
+        .collect();
+
+    // Buffer into a Vec-backed AutoStream (BufWriter isn't a RawStream), then
+    // flush once. anstream governs color; the branch below governs layout.
+    let mut sink = anstream::AutoStream::new(Vec::<u8>::new(), choice);
+    if columns {
+        print_columns(&items, &mut sink);
     } else {
-        // Piped: one match per line, plain text only (no terminal codes).
-        let mut out = BufWriter::new(stdout.lock());
-        for word in words {
-            if let Some(info) = matcher(word) {
-                MatchItem::new(word, &info, delta).render(&mut out, false);
-                out.write_all(b"\n").unwrap();
-            }
+        for item in &items {
+            item.render(&mut sink);
+            sink.write_all(b"\n").unwrap();
         }
     }
+    raw.lock().write_all(&sink.into_inner()).unwrap();
 }
 
 fn main() {

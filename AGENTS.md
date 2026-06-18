@@ -86,14 +86,21 @@ but in practice only the single anagram part contributes anything.
 
 **The CLI surfaces this behind `-d`/`--delta`** (off by default; applies to both
 one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
-(ASCII, mirroring the GUI). Two rendering rules matter:
+(ASCII, mirroring the GUI). Two rules matter:
 
-- In terminal multi-column mode the delta is grayed with `\x1b[90m`/`\x1b[0m`.
-  Those bytes are **not** display width, so `MatchItem::width()` excludes them and
-  the column layout pads on display width only — keep that split or columns will
-  misalign. The delta and word are ASCII, so `str::len()` equals column count.
-- In piped (non-terminal) single-column mode, **no terminal codes are emitted** —
-  the delta is appended as plain ` -UNUSED +EXTRA` so pipelines stay clean.
+- **Color is delegated to `anstream`/`anstyle`, not hand-rolled.** The delta is a
+  `const anstyle::Style` (gray = `BrightBlack`); `render` always emits the escape
+  codes, and output is written through an `anstream::AutoStream` whose
+  `ColorChoice` is resolved once via `AutoStream::choice(&stdout)`. That honors tty
+  detection, `NO_COLOR`, `CLICOLOR`/`CLICOLOR_FORCE`, `TERM`, and CI — and strips
+  the codes itself when color isn't wanted, so piped output stays clean with no
+  manual `if color` plumbing. Don't reintroduce raw `\x1b[..]` constants.
+  (`anstyle`/`anstream` are already in the tree via `clap`'s `color` feature.)
+- **Column width must exclude the escape codes.** `MatchItem::width()` counts only
+  the visible word + delta (both ASCII, so `str::len()` == columns); the gray
+  codes are zero-width. Keep that split or columns misalign. The AutoStream is
+  backed by a `Vec<u8>` (not `BufWriter` — anstream's `RawStream` is sealed and
+  excludes `BufWriter`, but includes `Vec<u8>`), buffered then flushed once.
 
 ## GUI (`cha-gui`, Tauri v2)
 

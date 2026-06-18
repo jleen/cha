@@ -11,6 +11,8 @@ name = "cha"
 path = "src/main.rs"
 
 [dependencies]
+anstream = "1"
+anstyle = "1"
 cha-core = { path = "cha-core" }
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
