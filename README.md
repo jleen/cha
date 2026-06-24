@@ -50,6 +50,20 @@ results.  Enter `^D` on an empty line to exit.
 | `a`–`z` | Literal letter (case-insensitive) |
 | `-` `'` ` ` | Punctuation (see below) |
 | `1`–`9` | Same letter as other occurences of that digit|
+| `` `N `` | Allow up to *N* literal letters to vary |
+
+### Variant matching
+
+The `` `N `` syntax specifies that `N` many literals can be
+“wrong”, i.e. different from the given.  Thus `` foo`1 `` will match `foe` and `goo`.
+This has no effect on wildcards, but cannot be combined with anagrams or the `*`
+wildcard.
+
+```
+cat`1     # CAT, BAT, CAR, COT, … (one letter off)
+electron`2  # up to two letters off
+.at`1     # the `.` still matches any letter; only `a` or `t` may vary
+```
 
 ### Punctuation
 
