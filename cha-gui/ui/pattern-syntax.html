@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pattern Syntax</title>
+    <link rel="stylesheet" href="pattern-syntax.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Pattern Syntax</h1>
+
+      <table class="tokens">
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>.</code></td><td>One letter</td></tr>
+          <tr><td><code>*</code></td><td>Zero or more letters</td></tr>
+          <tr><td><code>@</code></td><td>A vowel (a e i o u)</td></tr>
+          <tr><td><code>#</code></td><td>A consonant</td></tr>
+          <tr><td><code>[abc]</code></td><td>One letter from the set</td></tr>
+          <tr><td><code>a</code>–<code>z</code></td><td>Literal letter (case-insensitive)</td></tr>
+          <tr><td><code>-</code> <code>'</code> <code>&nbsp;</code></td><td>Punctuation (see below)</td></tr>
+          <tr><td><code>1</code>–<code>9</code></td><td>Same letter as other occurrences of that digit</td></tr>
+          <tr><td><code>`N</code></td><td>Allow up to <em>N</em> literal letters to vary</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Variant matching</h2>
+      <p>
+        The <code>`N</code> syntax specifies that <code>N</code> many literals can
+        be “wrong”, i.e. different from the given. Thus <code>foo`1</code> will
+        match <code>foe</code> and <code>goo</code>. This has no effect on
+        wildcards, but cannot be combined with anagrams or the <code>*</code>
+        wildcard.
+      </p>
+      <pre><code>cat`1       # CAT, BAT, CAR, COT, … (one letter off)
+electron`2  # up to two letters off
+.at`1       # the . still matches any letter; only a or t may vary</code></pre>
+
+      <h2>Punctuation</h2>
+      <p>
+        Punctuation in the word list is ignored, unless punctuation is provided
+        in the pattern. If the pattern is punctuated then the word must match the
+        punctuation.
+      </p>
+
+      <h2>Examples</h2>
+      <pre><code>.y...l        # HYMNAL, SYMBOL, …
+@#@#@#@#@#@   # alternating vowel/consonant, 11 letters
+1234321       # palindromes (DEIFIED, RACECAR, …)
+...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)</code></pre>
+
+      <h2>Anagrams</h2>
+      <p>
+        A semicolon introduces an anagram pool. Letters before <code>;</code> are
+        a template; letters after <code>;</code> are the pool.
+      </p>
+      <pre><code>;ilphone          # anagram of ILPHONE → PINHOLE, …
+;..exit           # anagram of EXIT + 2 wildcards
+;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
+t....;intra       # starts with T, is an anagram of INTRA
+;(che)rostra      # anagram of CHEROST RA that contains CHE exactly</code></pre>
+
+      <h2>Logic</h2>
+      <p>Use <code>&amp;</code> to combine patterns and <code>!</code> to negate:</p>
+      <pre><code>c.. &amp; *at          # three-letter word starting with C and ending in AT
+;intra &amp; ! *a      # anagram match but not ending in -A
+!c* &amp; !*t          # doesn't start with C, doesn't end in T</code></pre>
+    </main>
+  </body>
+</html>

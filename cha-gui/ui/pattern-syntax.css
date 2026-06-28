@@ -1,0 +1,104 @@
+:root {
+  --bg: #1e1e1e;
+  --fg: #e0e0e0;
+  --muted: #888;
+  --accent: #4a9eff;
+  --border: #333;
+  --panel: #2a2a2a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+main {
+  max-width: 40em;
+  margin: 0 auto;
+  padding: 20px 24px 32px;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 22px;
+}
+
+h2 {
+  margin: 24px 0 8px;
+  font-size: 16px;
+  color: var(--accent);
+}
+
+p {
+  margin: 8px 0;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Inline code: a faint chip so the special characters stand out. */
+p code,
+td code,
+th code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+table.tokens {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+table.tokens th,
+table.tokens td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+table.tokens th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+table.tokens td:first-child {
+  white-space: nowrap;
+}
+
+/* Code blocks keep their own inline-style comments aligned via monospace. */
+pre {
+  margin: 8px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
