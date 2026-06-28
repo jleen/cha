@@ -127,6 +127,55 @@ one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
   Don't drop the pin (or let `cargo update` move it) until tauri/cookie or rustc
   resolves it.
 
+### Multiple windows and menus (Tauri v2, hard-won on Windows)
+
+The app has File → New Window (open another search window) and Help → Pattern
+Syntax (a singleton static cheat-sheet window). Getting this working
+cross-platform surfaced several non-obvious traps — all in
+[`main.rs`](cha-gui/src-tauri/src/main.rs), [`main.js`](cha-gui/ui/main.js), and
+[`capabilities/default.json`](cha-gui/src-tauri/capabilities/default.json):
+
+- **Create windows only on the event-loop (main) thread.** `#[tauri::command]`
+  handlers run *off* it, and `WebviewWindowBuilder::build()` off the main thread
+  on Windows half-creates a blank window and then deadlocks the whole app.
+  `run_on_main_thread` from inside a command did **not** reliably break this.
+  Two patterns that *do* work: (a) from Rust, build windows only in event-loop
+  callbacks like `on_menu_event` (where `open_search_window` /
+  `open_pattern_syntax_window` are called); (b) from the front end, use the JS
+  `new WebviewWindow(label, opts)` API (`window.__TAURI__.webviewWindow`), which
+  lets Tauri schedule creation on the event loop for you. Do **not** hand-roll an
+  `invoke("new_window")` → `build()` command.
+
+- **Menu accelerators don't fire on Windows when the webview has focus.** WebView2
+  swallows the keystroke before the native accelerator table sees it. Standard
+  editing keys (Ctrl+C/V/X/A/Z) still work anyway because WebView2 implements
+  them *itself* — independent of the menu — but a custom accelerator like Ctrl+N
+  just evaporates. Fix: bind it in a JS `keydown` handler. Gate that handler to
+  **non-macOS** (`navigator.platform`): on macOS the native menu consumes Cmd+N
+  before the webview sees it, so a JS handler there would open two windows. Keep
+  the `.accelerator("CmdOrCtrl+N")` on the menu item regardless — it drives the
+  macOS behavior and shows the shortcut hint everywhere.
+
+- **The capability `windows` list must glob to match runtime windows.** Each new
+  window gets a unique label (`main-2…` from Rust, `main-<timestamp>` from JS), so
+  the capability is scoped to `["main", "main-*", "pattern-syntax"]`. Without the
+  glob, a new window's `invoke()` calls are silently blocked. Creating a window
+  *from the front end* additionally needs the
+  `core:webview:allow-create-webview-window` permission.
+
+- **The macOS app menu is macOS-only.** `build_menu` gates the App submenu
+  (About/Services/Hide/Quit) behind `#[cfg(target_os = "macos")]`; on Windows/Linux
+  it's not idiomatic, so Quit moves under File there. Wire the menu via
+  `Builder::menu(build_menu)` (which takes `&AppHandle`), **not**
+  `App::set_menu` in `setup` — the former registers the accelerator table on the
+  initial window at creation. Standard items are `PredefinedMenuItem`s (Tauri
+  owns their labels/localization); only New Window and Pattern Syntax are custom.
+
+- **Singleton windows:** re-opening Pattern Syntax focuses the existing window via
+  `get_webview_window("pattern-syntax")` + `set_focus()` instead of stacking
+  duplicates. `AppHandle::clone()` is cheap (an `Arc` bump) — clone freely to move
+  a handle into a `'static` closure.
+
 ## What to avoid
 
 - Do not allocate `Vec<char>` or `String` on the per-word *reject* path of the
