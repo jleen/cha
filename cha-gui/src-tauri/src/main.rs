@@ -125,30 +125,45 @@ fn open_pattern_syntax_window(app: &tauri::AppHandle) {
 
 /// Build the full standard application menu (App / File / Edit / Window / Help).
 /// Standard items are `PredefinedMenuItem`s that Tauri labels and localizes; the
-/// only custom items are "New Window" and "Pattern Syntax". macOS-only items are
-/// ignored on Windows/Linux, where the menu renders inside each window.
-fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    let app_menu = SubmenuBuilder::new(app, "Cha")
-        .about(None)
-        .separator()
-        .services()
-        .separator()
-        .hide()
-        .hide_others()
-        .show_all()
-        .separator()
-        .quit()
-        .build()?;
+/// only custom items are "New Window" and "Pattern Syntax".
+///
+/// The macOS "app menu" (About/Services/Hide/Quit) is macOS-only and is omitted
+/// on Windows/Linux, where it isn't idiomatic; there, Quit lives under File. The
+/// menu is wired in via `Builder::menu` (not `App::set_menu`) so accelerators
+/// like Ctrl+N register on the initial window's accelerator table on Windows.
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let mut menu = MenuBuilder::new(app);
+
+    #[cfg(target_os = "macos")]
+    {
+        let app_menu = SubmenuBuilder::new(app, "Cha")
+            .about(None)
+            .separator()
+            .services()
+            .separator()
+            .hide()
+            .hide_others()
+            .show_all()
+            .separator()
+            .quit()
+            .build()?;
+        menu = menu.item(&app_menu);
+    }
 
     let new_window = MenuItemBuilder::new("New Window")
         .id("new_window")
         .accelerator("CmdOrCtrl+N")
         .build(app)?;
-    let file_menu = SubmenuBuilder::new(app, "File")
+    let file = SubmenuBuilder::new(app, "File")
         .item(&new_window)
         .separator()
-        .item(&PredefinedMenuItem::close_window(app, None)?)
-        .build()?;
+        .item(&PredefinedMenuItem::close_window(app, None)?);
+    // Windows/Linux have no app menu, so Quit belongs under File there.
+    #[cfg(not(target_os = "macos"))]
+    let file = file
+        .separator()
+        .item(&PredefinedMenuItem::quit(app, None)?);
+    let file_menu = file.build()?;
 
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
@@ -172,8 +187,10 @@ fn build_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> 
         .item(&pattern_syntax)
         .build()?;
 
-    MenuBuilder::new(app)
-        .items(&[&app_menu, &file_menu, &edit_menu, &window_menu, &help_menu])
+    menu.item(&file_menu)
+        .item(&edit_menu)
+        .item(&window_menu)
+        .item(&help_menu)
         .build()
 }
 
@@ -221,11 +238,10 @@ fn load_dict(app: &tauri::App) -> Dict {
 
 fn main() {
     tauri::Builder::default()
+        .menu(build_menu)
         .setup(|app| {
             let dict = load_dict(app);
             app.manage(dict);
-            let menu = build_menu(app)?;
-            app.set_menu(menu)?;
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
