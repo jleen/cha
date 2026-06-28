@@ -28,6 +28,31 @@ input.addEventListener("input", () => {
   timer = setTimeout(run, 100); // debounce keystrokes
 });
 
+// On Windows/Linux the webview swallows Ctrl+N before the native menu's
+// accelerator can fire, so bind it here. macOS handles Cmd+N via the native menu
+// (the webview never sees it), so we skip it there to avoid opening two windows.
+//
+// We create the window through Tauri's built-in WebviewWindow API rather than a
+// custom Rust command: Tauri schedules the creation on the event-loop thread for
+// us, avoiding the off-main-thread window-creation hang that a hand-rolled
+// command runs into on Windows.
+const { WebviewWindow } = window.__TAURI__.webviewWindow;
+const isMac = navigator.platform.toUpperCase().includes("MAC");
+if (!isMac) {
+  window.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === "n" || e.key === "N")) {
+      e.preventDefault();
+      const w = new WebviewWindow(`main-${Date.now()}`, {
+        url: "index.html",
+        title: "Cha",
+        width: 720,
+        height: 640,
+      });
+      w.once("tauri://error", (err) => console.error("new window failed", err));
+    }
+  });
+}
+
 async function run() {
   const pattern = input.value;
   if (pattern.trim() === "") {

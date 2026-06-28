@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the Cha main window.",
   "windows": ["main", "main-*", "pattern-syntax"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:webview:allow-create-webview-window"]
 }
