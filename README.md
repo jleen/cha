@@ -1,9 +1,9 @@
 # Cha 茶
 
 Cha 茶 is a pattern-matching and anagramming word tool intended to assist
-in solving cryptic crosswords, acrostics, and other such word puzzles.
-Cha understands a pattern language based on Ross Beresford’s classic
-TEA Crossword Helper.
+in solving cryptic crosswords, acrostics, and other such word puzzles.  Cha
+understands a pattern language based on the classic TEA Crossword Helper.
+(Cha, however, has no relation to TEA other than as a source of inspiration.)
 
 Cha is provided as a cross-platform GUI application that will run on Mac OS,
 Windows, and Linux; as well as a CLI tool that will run on pretty much anything
