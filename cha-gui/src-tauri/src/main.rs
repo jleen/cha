@@ -80,6 +80,55 @@ fn dict_status(dict: tauri::State<Dict>) -> Option<String> {
     dict.error.clone()
 }
 
+/// Open the user's dictionary directory in the platform file manager. Invoked
+/// from the front end's "Open Dictionary Folder" notice button, and (via
+/// `open_dict_dir_impl`) from the File menu. The directory is created first so
+/// there is always something to reveal, even if it was deleted after startup.
+#[tauri::command]
+fn open_dict_dir(app: tauri::AppHandle) {
+    open_dict_dir_impl(&app);
+}
+
+/// The dictionary directory: a `dictionaries` subfolder of the app config dir
+/// (e.g. `~/Library/Application Support/org.saturnvalley.cha/dictionaries` on
+/// macOS). Returns `None` only when the config dir can't be located at all.
+fn dict_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    match app.path().app_config_dir() {
+        Ok(dir) => Some(dir.join("dictionaries")),
+        Err(e) => {
+            eprintln!("Cha: no config dir available ({e})");
+            None
+        }
+    }
+}
+
+/// Ensure the dictionary directory exists, then reveal it in the file manager.
+fn open_dict_dir_impl(app: &tauri::AppHandle) {
+    let Some(dir) = dict_dir(app) else { return };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Cha: could not create {}: {e}", dir.display());
+        return;
+    }
+    open_folder(&dir);
+}
+
+/// Open a folder in the platform's file manager (Finder / Explorer / the
+/// freedesktop default via `xdg-open`). Spawning a subprocess is safe off the
+/// event-loop thread, unlike window creation, so this works from either a
+/// command handler or a menu callback. We don't wait on the child.
+fn open_folder(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let program = "xdg-open";
+
+    if let Err(e) = std::process::Command::new(program).arg(path).spawn() {
+        eprintln!("Cha: could not open {}: {e}", path.display());
+    }
+}
+
 /// Monotonic counter for minting unique labels for additional search windows.
 /// The first window uses the config-defined `main` label; subsequent ones are
 /// `main-2`, `main-3`, … Labels must be unique for the lifetime of the app, so a
@@ -154,15 +203,18 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .id("new_window")
         .accelerator("CmdOrCtrl+N")
         .build(app)?;
+    let open_dict = MenuItemBuilder::new("Open Dictionary Folder")
+        .id("open_dict_dir")
+        .build(app)?;
     let file = SubmenuBuilder::new(app, "File")
         .item(&new_window)
+        .separator()
+        .item(&open_dict)
         .separator()
         .item(&PredefinedMenuItem::close_window(app, None)?);
     // Windows/Linux have no app menu, so Quit belongs under File there.
     #[cfg(not(target_os = "macos"))]
-    let file = file
-        .separator()
-        .item(&PredefinedMenuItem::quit(app, None)?);
+    let file = file.separator().item(&PredefinedMenuItem::quit(app, None)?);
     let file_menu = file.build()?;
 
     let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -194,62 +246,96 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .build()
 }
 
-/// Build the dictionary from the embedded list when present, otherwise from
-/// `words.txt` in the app's config dir (e.g. `~/.config/org.saturnvalley.cha/`
-/// on Linux). A missing or unreadable runtime file yields an empty dictionary
-/// rather than aborting, so the GUI still opens.
-fn load_dict(app: &tauri::App) -> Dict {
+/// Build the dictionary by starting from the embedded list (when present at
+/// build time) and then concatenating every file the user has placed in their
+/// dictionary directory, deduplicating across all sources. The directory is
+/// created on startup so there's an obvious, openable place to add lists.
+///
+/// This is intentionally additive: the directory supplements the embedded list
+/// rather than replacing it. A word list is considered available whenever *any*
+/// source yielded words; the notice (and its "Open Dictionary Folder" button)
+/// appears only when there are no words at all. Files added while the app is
+/// running are picked up on the next launch, so the notice says to reopen Cha.
+fn load_dict(app: &tauri::AppHandle) -> Dict {
+    let mut builder = dictionary::WordListBuilder::new();
     if let Some(text) = EMBEDDED_WORDS {
-        return Dict {
-            words: dictionary::load_words_from_str(text),
-            error: None,
-        };
+        builder.add_str(text);
     }
-    match app.path().app_config_dir() {
-        Ok(dir) => {
-            let path = dir.join("words.txt");
-            match dictionary::load_words(&path.to_string_lossy()) {
-                Ok(words) => Dict { words, error: None },
-                Err(e) => {
-                    eprintln!("Cha: could not read {}: {e}", path.display());
-                    let msg = format!(
-                        "No word list found.\n\nPlace a words.txt file here:\n{}",
-                        path.display()
-                    );
-                    Dict {
-                        words: Vec::new(),
-                        error: Some(msg),
-                    }
-                }
-            }
+
+    let dir = dict_dir(app);
+    if let Some(dir) = &dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("Cha: could not create {}: {e}", dir.display());
+        } else {
+            load_dir_files(dir, &mut builder);
         }
+    }
+
+    let words = builder.finish();
+    let error = if words.is_empty() {
+        Some(match &dir {
+            Some(dir) => format!(
+                "No word list found.\n\nAdd one or more dictionary files (plain \
+                 text, one word per line) to this folder, then reopen Cha:\n{}",
+                dir.display()
+            ),
+            None => "No word list found, and the app config directory could not \
+                     be located on this system."
+                .to_string(),
+        })
+    } else {
+        None
+    };
+    Dict { words, error }
+}
+
+/// Concatenate every regular, non-hidden file in `dir` into `builder`, in sorted
+/// filename order for determinism. Subdirectories and hidden files (e.g. macOS
+/// `.DS_Store`, whose binary contents would inject junk "words") are skipped, as
+/// are individually unreadable files — a bad file shouldn't sink the whole load.
+fn load_dir_files(dir: &std::path::Path, builder: &mut dictionary::WordListBuilder) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
         Err(e) => {
-            eprintln!("Cha: no config dir available ({e}); starting with an empty word list");
-            let msg = "No word list found, and the app config directory could \
-                       not be located on this system."
-                .to_string();
-            Dict {
-                words: Vec::new(),
-                error: Some(msg),
-            }
+            eprintln!("Cha: could not read {}: {e}", dir.display());
+            return;
+        }
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && !is_hidden(p))
+        .collect();
+    paths.sort();
+    for path in &paths {
+        if let Err(e) = builder.add_file(path) {
+            eprintln!("Cha: could not read {}: {e}", path.display());
         }
     }
+}
+
+/// Whether a path's file name begins with a dot (a dotfile on Unix; also filters
+/// macOS metadata files like `.DS_Store` regardless of platform).
+fn is_hidden(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'))
 }
 
 fn main() {
     tauri::Builder::default()
         .menu(build_menu)
         .setup(|app| {
-            let dict = load_dict(app);
+            let dict = load_dict(app.handle());
             app.manage(dict);
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "new_window" => open_search_window(app),
+            "open_dict_dir" => open_dict_dir_impl(app),
             "pattern_syntax" => open_pattern_syntax_window(app),
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![search, dict_status])
+        .invoke_handler(tauri::generate_handler![search, dict_status, open_dict_dir])
         .run(tauri::generate_context!())
         .expect("error while running Cha");
 }

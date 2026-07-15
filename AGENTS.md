@@ -110,17 +110,32 @@ one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
   a JS framework or build tool without a strong reason.
 - **The word list is embedded via `include_str!` when `words.txt` is present at
   the repo root at build time** (the usual case). `build.rs` gates the embed
-  behind a `words_embedded` cfg, so when the file is absent the GUI still
-  compiles and instead loads `words.txt` from the app config dir at runtime
-  (e.g. `~/.config/org.saturnvalley.cha/words.txt`); a missing or unreadable
-  file there leaves an empty dictionary rather than aborting. In that case the
-  `dict_status` command returns a user-facing message naming the expected path,
+  behind a `words_embedded` cfg (it can't be a runtime `if` — `include_str!`
+  expands unconditionally — which is why the decision lives in `build.rs`).
+- **The dictionary is embedded + directory, deduped across both** (see
+  `load_dict`/`load_dir_files` in [`main.rs`](cha-gui/src-tauri/src/main.rs)).
+  On startup the app creates a `dictionaries/` subfolder of the app config dir
+  (e.g. `~/Library/Application Support/org.saturnvalley.cha/dictionaries`, or
+  `~/.config/…` on Linux), then concatenates *every* regular non-hidden file in
+  it on top of the embedded list — additive, not a replacement. Hidden files
+  (`.DS_Store`) are skipped so their binary contents don't inject junk words;
+  files load in sorted-name order; unreadable files are warned-and-skipped.
+  `cha_core::dictionary::WordListBuilder` does the cross-source trim/lowercase/
+  dedup. Files are read once at launch, so newly added lists need a reopen (the
+  notice says so). This is the first step toward multiple selectable dictionaries.
+- **Opening the folder:** File → Open Dictionary Folder and the notice's
+  "Open Dictionary Folder" button both reach `open_dict_dir_impl`, which
+  `create_dir_all`s the folder then shells out to `open`/`explorer`/`xdg-open`
+  via `open_folder`. Spawning a subprocess is safe off the event-loop thread
+  (unlike window creation), so the front-end button can invoke the
+  `open_dict_dir` command directly. Custom commands need no capability entry.
+- **The empty-dictionary notice.** When *no* source yielded any words,
+  `dict_status` returns a user-facing message naming the `dictionaries/` path,
   which the front end shows as a notice on startup (and disables input) so an
-  empty result area isn't mistaken for "no matches". The cfg can't be a runtime
-  `if` — `include_str!` expands unconditionally — which is why the decision
-  lives in `build.rs`. The `search` command caps returned matches at
-  `MAX_RESULTS` (5000) but reports the true total, so a pattern like `*` can't
-  flood the DOM.
+  empty result area isn't mistaken for "no matches". On an embedded build this
+  never fires (embedded words are always present). The `search` command caps
+  returned matches at `MAX_RESULTS` (5000) but reports the true total, so a
+  pattern like `*` can't flood the DOM.
 - **`time` is pinned to `=0.3.47`** in `cha-gui/src-tauri/Cargo.toml`. 0.3.48
   trips an E0119 coherence false-positive (rust-lang/rust#100712) against
   `cookie 0.18.1` under rustc 1.96; 0.3.47 still satisfies plist's `^0.3.47`.

@@ -91,6 +91,30 @@ header {
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 14px;
   line-height: 1.6;
+}
+
+.notice-text {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.notice-button {
+  margin-top: 14px;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.notice-button:hover {
+  filter: brightness(1.1);
+}
+
+.notice-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

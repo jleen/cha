@@ -13,16 +13,18 @@ standalone crate.
 ## Word list
 
 No word list is provided. You’ll need to procure your own word list and provide
-it as a text file called `words.txt`, one lowercase word per line.
+it as a text file, one lowercase word per line.
 
-If you provide `words.txt` at compile time, it will be compiled into the GUI
-application and bundled with it.  Otherwise, you’ll need to provide a
-`words.txt` at run time.
+The GUI expects one or more word list files to be located in a designated directory
+(see below).  In addition,
+if you provide `words.txt` at compile time, it will be compiled into the GUI
+application and bundled with it, to be used in addition to any
+user-provided word lists.
 
 ## GUI usage
 
-Just install and run the application. If `words.txt` is not found,
-you’ll see a message telling you where to put it.
+Just install and run the application. If no word lists are found,
+you’ll see a message with a button that opens the word list folder for you.
 
 ## CLI usage
 
@@ -135,7 +137,7 @@ cargo tauri build    # compile and package a release build
 
 ## Benchmarking
 
-The CLI supports a benchmarking mode that will load the dictionary once and
+The CLI supports a benchmarking mode that will load the word list once and
 do a word search repeatedly, for performance profiling purposes.
 Pass `-b N` to run the matcher N times and report the elapsed time:
 

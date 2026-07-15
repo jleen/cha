@@ -18,7 +18,14 @@ async function checkDict() {
   input.placeholder = "Word list unavailable";
   const notice = document.createElement("div");
   notice.className = "notice";
-  notice.textContent = message;
+  const text = document.createElement("div");
+  text.className = "notice-text";
+  text.textContent = message;
+  const button = document.createElement("button");
+  button.className = "notice-button";
+  button.textContent = "Open Dictionary Folder";
+  button.addEventListener("click", () => invoke("open_dict_dir"));
+  notice.replaceChildren(text, button);
   results.replaceChildren(notice);
 }
 checkDict();
