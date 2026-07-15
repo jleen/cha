@@ -413,16 +413,27 @@ fn count_chars(chars: &[char]) -> [usize; 26] {
     counts
 }
 
-fn count_str(s: &str) -> ([usize; 26], usize) {
+/// Count the ASCII letters of `s` into a 26-bucket histogram, returning the
+/// histogram, the total letter count, and `has_other`: whether `s` contains any
+/// character that is not an ASCII letter (a digit, symbol, or non-ASCII letter —
+/// its UTF-8 bytes are all non-`is_ascii_alphabetic`). Callers matching pure
+/// anagrams use `has_other` to reject candidates that carry non-letter cruft, so
+/// the anagram alphabet matches the template path's ASCII `[a-z]`. Punctuation
+/// (`space -'`) has already been stripped from candidates upstream, so it never
+/// registers as "other" here.
+fn count_str(s: &str) -> ([usize; 26], usize, bool) {
     let mut counts = [0usize; 26];
     let mut len = 0;
+    let mut has_other = false;
     for b in s.bytes() {
         if b.is_ascii_alphabetic() {
             counts[(b.to_ascii_lowercase() - b'a') as usize] += 1;
             len += 1;
+        } else {
+            has_other = true;
         }
     }
-    (counts, len)
+    (counts, len, has_other)
 }
 
 fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
@@ -528,7 +539,15 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
             tm(candidate)?;
         }
 
-        let (candidate_counter, candidate_len) = count_str(candidate);
+        let (candidate_counter, candidate_len, has_other) = count_str(candidate);
+
+        // A pure anagram rearranges letters, so a candidate carrying any non-letter
+        // character (digit, symbol, or non-ASCII letter) is not a clean anagram —
+        // reject it, mirroring the template path's ASCII `[a-z]`. The hybrid path
+        // (is_pure == false) is already governed by its anchored template regex.
+        if is_pure && has_other {
+            return None;
+        }
 
         'combo: for (pool_counter, pool_base) in &combo_pools {
             let pool_size = pool_base + num_wildcards;
@@ -661,6 +680,36 @@ mod tests {
         assert!(compile_pattern_checked("cat").unwrap().note.is_none());
         assert!(compile_pattern_checked(";br").unwrap().note.is_none());
         assert!(compile_pattern_checked(";.").unwrap().note.is_none());
+    }
+
+    #[test]
+    fn test_anagram_dot_matches_only_clean_letters() {
+        // `;.` must behave like the template `.`: a single ASCII letter, and
+        // nothing carrying non-letter cruft or non-ASCII letters.
+        let m = compile_pattern(";.").unwrap();
+        assert!(m("a").is_some());
+        assert!(m(".c").is_none()); // stray '.'
+        assert!(m("3a").is_none()); // digit
+        assert!(m("a!").is_none()); // symbol
+        assert!(m("æ").is_none()); // non-ASCII letter
+    }
+
+    #[test]
+    fn test_pure_anagram_rejects_non_letter_candidates() {
+        // `;br` is a clean anagram of {b,r}: it matches "br" but not the junk
+        // entries the old letter-only histogram used to admit.
+        let m = compile_pattern(";br").unwrap();
+        assert!(m("br").is_some());
+        assert!(m(".br").is_none()); // stray '.'
+        assert!(m("bær").is_none()); // non-ASCII letter
+    }
+
+    #[test]
+    fn test_hybrid_anagram_unaffected_by_junk_rejection() {
+        // The hybrid path (template + pool) is governed by its template regex and
+        // must keep matching its clean candidates.
+        let m = compile_pattern("z....;brae").unwrap();
+        assert!(m("zebra").is_some());
     }
 
     #[test]
