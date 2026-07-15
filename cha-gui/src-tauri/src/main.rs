@@ -50,7 +50,12 @@ struct SearchResult {
     note: Option<String>,
 }
 
-#[tauri::command]
+// `(async)` runs this on Tauri's worker thread pool rather than the main thread.
+// Scanning the full word list (~270k entries) takes long enough that running it
+// on the main thread would freeze the window — no typing, no repaint — until it
+// returned. `Dict` is `Send + Sync`, so `State` access off-thread is safe. The
+// body stays synchronous; there are no await points.
+#[tauri::command(async)]
 fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, String> {
     let pattern = pattern.trim();
     if pattern.is_empty() {

@@ -8,6 +8,13 @@ const status = document.querySelector("#status");
 
 let timer;
 
+// Monotonic id for in-flight searches. Since searches now run concurrently on
+// the backend's worker pool, a slow search can resolve after a newer one; we
+// stamp each with an id and ignore any result that isn't the latest, so the
+// freshest query always wins and the user can keep typing without stale results
+// flickering in.
+let latestSearch = 0;
+
 // On startup, ask the backend whether a word list is available. If not, show a
 // friendly notice (with the exact path the file belongs at) and disable input,
 // so an empty result area isn't mistaken for "no matches".
@@ -63,14 +70,18 @@ if (!isMac) {
 async function run() {
   const pattern = input.value;
   if (pattern.trim() === "") {
+    latestSearch++; // supersede any in-flight search so its result is dropped
     results.replaceChildren();
     status.textContent = "";
     return;
   }
+  const myId = ++latestSearch;
   try {
     const { matches, total, note } = await invoke("search", { pattern });
+    if (myId !== latestSearch) return; // a newer search superseded this one
     render(matches, total, note);
   } catch (e) {
+    if (myId !== latestSearch) return;
     results.replaceChildren();
     status.textContent = String(e);
     status.classList.add("error");
