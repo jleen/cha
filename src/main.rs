@@ -158,8 +158,16 @@ fn print_columns(items: &[MatchItem], out: &mut impl Write) {
 }
 
 fn run_pattern(pat: &str, words: &[String], delta: bool) {
-    let matcher = match pattern::compile_pattern(pat) {
-        Ok(m) => m,
+    let matcher = match pattern::compile_pattern_checked(pat) {
+        // A contentless pattern (e.g. a bare `;`) matches nothing; report the
+        // gentle note plainly and skip the scan. It's not an error.
+        Ok(pattern::Compiled {
+            note: Some(note), ..
+        }) => {
+            eprintln!("{}", note);
+            return;
+        }
+        Ok(pattern::Compiled { matcher, .. }) => matcher,
         Err(e) => {
             eprintln!("error: {}", e);
             return;

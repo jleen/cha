@@ -68,8 +68,8 @@ async function run() {
     return;
   }
   try {
-    const { matches, total } = await invoke("search", { pattern });
-    render(matches, total);
+    const { matches, total, note } = await invoke("search", { pattern });
+    render(matches, total, note);
   } catch (e) {
     results.replaceChildren();
     status.textContent = String(e);
@@ -77,8 +77,17 @@ async function run() {
   }
 }
 
-function render(matches, total) {
+function render(matches, total, note) {
   status.classList.remove("error");
+
+  // A contentless pattern (e.g. a bare `;`) carries a gentle note: show it in the
+  // normal status style — like "no matches", never the red error style — and no rows.
+  if (note) {
+    results.replaceChildren();
+    status.textContent = note;
+    return;
+  }
+
   const frag = document.createDocumentFragment();
   for (const m of matches) {
     const row = document.createElement("div");

@@ -44,6 +44,10 @@ struct MatchRow {
 struct SearchResult {
     matches: Vec<MatchRow>,
     total: usize,
+    /// A gentle note for a contentless pattern (e.g. a bare `;`) — shown in the
+    /// normal status style, never as a red error. Absent for ordinary patterns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[tauri::command]
@@ -53,13 +57,16 @@ fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, Str
         return Ok(SearchResult {
             matches: vec![],
             total: 0,
+            note: None,
         });
     }
-    let matcher = pattern::compile_pattern(pattern).map_err(|e| e.to_string())?;
+    let compiled = pattern::compile_pattern_checked(pattern).map_err(|e| e.to_string())?;
+    // A contentless pattern's matcher matches nothing, so the scan is a no-op;
+    // the note carries through for the front end to display gently.
     let mut total = 0usize;
     let mut matches = Vec::new();
     for word in &dict.words {
-        if let Some(info) = matcher(word) {
+        if let Some(info) = (compiled.matcher)(word) {
             total += 1;
             if matches.len() < MAX_RESULTS {
                 matches.push(MatchRow {
@@ -70,7 +77,11 @@ fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, Str
             }
         }
     }
-    Ok(SearchResult { matches, total })
+    Ok(SearchResult {
+        matches,
+        total,
+        note: compiled.note,
+    })
 }
 
 /// Returns a user-facing message when no word list could be loaded, else `None`.

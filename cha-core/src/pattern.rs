@@ -34,9 +34,27 @@ impl std::fmt::Display for PatternError {
 
 impl std::error::Error for PatternError {}
 
-pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
+/// The result of compiling a pattern: a matcher plus an optional gentle note.
+///
+/// `note` is `Some` when the pattern is well-formed but *contentless* — it has
+/// no letters or wildcard structure to match against (e.g. a bare `;`, an empty
+/// template, or a stray `!`). Such a pattern matches nothing, and callers should
+/// surface `note` gently (like a "no matches" message), *not* as a hard error:
+/// the user often sees it transiently mid-typing. Ordinary patterns have `None`.
+pub struct Compiled {
+    pub matcher: Matcher,
+    pub note: Option<String>,
+}
+
+/// Shown for a contentless pattern. Displayed gently by callers, never as an error.
+const CONTENTLESS_NOTE: &str = "Pattern has no letters to match";
+
+/// Compile a pattern, distinguishing a contentless pattern (well-formed but with
+/// nothing to match — carried as a note) from a genuine syntax error (`Err`).
+pub fn compile_pattern_checked(pattern_str: &str) -> Result<Compiled, PatternError> {
     let parts: Vec<&str> = pattern_str.split('&').collect();
     let mut matchers: Vec<(bool, Matcher)> = Vec::new();
+    let mut contentless = false;
 
     for part in parts {
         let part = part.trim();
@@ -45,12 +63,25 @@ pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
         } else {
             (false, part)
         };
-        matchers.push((negate, compile_one_pattern(actual)?));
+        // Compile every part regardless, so a real syntax error in any part
+        // (e.g. `;&ca$t`) still surfaces as a hard `Err` and takes precedence
+        // over the contentless note.
+        let (matcher, part_contentless) = compile_one_pattern(actual)?;
+        contentless |= part_contentless;
+        matchers.push((negate, matcher));
+    }
+
+    // A contentless pattern matches nothing (a no-op matcher) and reports a note.
+    if contentless {
+        return Ok(Compiled {
+            matcher: Box::new(|_| None),
+            note: Some(CONTENTLESS_NOTE.to_string()),
+        });
     }
 
     let has_punct = pattern_str.chars().any(|c| PUNCTUATION.contains(&c));
 
-    Ok(Box::new(move |word: &str| {
+    let matcher: Matcher = Box::new(move |word: &str| {
         let test_word: Cow<str> = if has_punct {
             Cow::Borrowed(word)
         } else if word.chars().any(|c| PUNCTUATION.contains(&c)) {
@@ -73,19 +104,48 @@ pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
             }
         }
         Some(info)
-    }))
+    });
+    Ok(Compiled {
+        matcher,
+        note: None,
+    })
 }
 
-fn compile_one_pattern(pattern: &str) -> Result<Matcher, PatternError> {
+pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
+    compile_pattern_checked(pattern_str).map(|c| c.matcher)
+}
+
+/// Compile one `&`-separated part, returning its matcher and whether it is
+/// *contentless* — well-formed but with no letters or wildcard structure to match
+/// (an empty template, or a bare `;` empty-pool anagram). Wildcards (`. * @ #`),
+/// classes `[…]`, and sub-patterns `(…)` count as content, so only genuinely empty
+/// parts are flagged.
+fn compile_one_pattern(pattern: &str) -> Result<(Matcher, bool), PatternError> {
     if let Some(idx) = pattern.find(';') {
         if idx == 0 {
-            compile_anagram(None, &pattern[1..])
+            // Pure anagram: contentless when the pool has no matchable tokens.
+            let contentless = anagram_pool_is_empty(&pattern[1..]);
+            Ok((compile_anagram(None, &pattern[1..])?, contentless))
         } else {
-            compile_anagram(Some(&pattern[..idx]), &pattern[idx + 1..])
+            Ok((
+                compile_anagram(Some(&pattern[..idx]), &pattern[idx + 1..])?,
+                false,
+            ))
         }
     } else {
-        compile_template(pattern)
+        // Template: contentless when it is empty after stripping any fuzz suffix.
+        let contentless = split_fuzz(pattern)?.0.is_empty();
+        Ok((compile_template(pattern)?, contentless))
     }
+}
+
+/// Whether an anagram pool contains no matchable tokens — no letters, wildcards
+/// (`.`/`*`), character classes (`[`), or sub-patterns (`(`). True only for a pool
+/// that is effectively empty (i.e. a bare `;`), which matches nothing meaningful.
+fn anagram_pool_is_empty(pool: &str) -> bool {
+    !pool
+        .chars()
+        .any(|c| c.is_alphabetic() || matches!(c, '.' | '*' | '[' | '('))
 }
 
 /// Split a trailing `` `N `` fuzz suffix off a template. Returns the base template
@@ -561,6 +621,54 @@ fn diff_letters(more: &[usize; 26], less: &[usize; 26]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_contentless_bare_semicolon() {
+        // A bare `;` is an empty-pool pure anagram: it used to match every
+        // zero-letter entry ("1984", "9/11", …). Now it's contentless: a note,
+        // and it matches nothing (including zero-letter words).
+        let c = compile_pattern_checked(";").unwrap();
+        assert!(c.note.is_some());
+        assert!((c.matcher)("cat").is_none());
+        assert!((c.matcher)("123").is_none());
+    }
+
+    #[test]
+    fn test_contentless_empty_template_conjunct() {
+        // A trailing `&` leaves an empty template conjunct.
+        let c = compile_pattern_checked("cat&").unwrap();
+        assert!(c.note.is_some());
+        assert!((c.matcher)("cat").is_none());
+    }
+
+    #[test]
+    fn test_contentless_bare_bang() {
+        // `!` alone is a negated empty template — contentless, matches nothing.
+        let c = compile_pattern_checked("!").unwrap();
+        assert!(c.note.is_some());
+        assert!((c.matcher)("cat").is_none());
+    }
+
+    #[test]
+    fn test_contentless_note_precedence_syntax_error_wins() {
+        // A real syntax error in any part still errors, even alongside `;`.
+        assert!(compile_pattern_checked(";&ca$t").is_err());
+    }
+
+    #[test]
+    fn test_ordinary_patterns_have_no_note() {
+        // Real content (including anagrams and wildcards) is never contentless.
+        assert!(compile_pattern_checked("cat").unwrap().note.is_none());
+        assert!(compile_pattern_checked(";br").unwrap().note.is_none());
+        assert!(compile_pattern_checked(";.").unwrap().note.is_none());
+    }
+
+    #[test]
+    fn test_contentless_semicolon_br_still_matches() {
+        // `;br` is a proper anagram of {b,r} and is unaffected by the fix.
+        let m = compile_pattern(";br").unwrap();
+        assert!(m("br").is_some());
+    }
 
     #[test]
     fn test_dot_wildcard() {
