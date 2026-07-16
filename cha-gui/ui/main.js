@@ -77,9 +77,9 @@ async function run() {
   }
   const myId = ++latestSearch;
   try {
-    const { matches, total, note } = await invoke("search", { pattern });
+    const { groups, total, list_count, note } = await invoke("search", { pattern });
     if (myId !== latestSearch) return; // a newer search superseded this one
-    render(matches, total, note);
+    render(groups, total, list_count, note);
   } catch (e) {
     if (myId !== latestSearch) return;
     results.replaceChildren();
@@ -88,7 +88,7 @@ async function run() {
   }
 }
 
-function render(matches, total, note) {
+function render(groups, total, listCount, note) {
   status.classList.remove("error");
 
   // A contentless pattern (e.g. a bare `;`) carries a gentle note: show it in the
@@ -99,31 +99,45 @@ function render(matches, total, note) {
     return;
   }
 
+  // Matches arrive grouped by source word list, in display order. We render each
+  // group's rows under an unobtrusive labeled rule — but only when more than one
+  // list is loaded; a single-list setup shows no header and looks unchanged.
+  const showHeaders = listCount > 1;
   const frag = document.createDocumentFragment();
-  for (const m of matches) {
-    const row = document.createElement("div");
-    row.className = "word";
-    row.textContent = m.word;
-
-    const parts = [];
-    if (m.unused) parts.push(`−${m.unused}`); // −unused pool letters
-    if (m.extra) parts.push(`+${m.extra}`); // +letters not in pool
-    if (parts.length) {
-      const annot = document.createElement("span");
-      annot.className = "word-annot";
-      annot.textContent = parts.join(" ");
-      row.appendChild(annot);
+  let shown = 0;
+  for (const g of groups) {
+    if (showHeaders) {
+      const header = document.createElement("div");
+      header.className = "list-header";
+      header.textContent = g.list;
+      frag.appendChild(header);
     }
+    for (const m of g.matches) {
+      const row = document.createElement("div");
+      row.className = "word";
+      row.textContent = m.word;
 
-    frag.appendChild(row);
+      const parts = [];
+      if (m.unused) parts.push(`−${m.unused}`); // −unused pool letters
+      if (m.extra) parts.push(`+${m.extra}`); // +letters not in pool
+      if (parts.length) {
+        const annot = document.createElement("span");
+        annot.className = "word-annot";
+        annot.textContent = parts.join(" ");
+        row.appendChild(annot);
+      }
+
+      frag.appendChild(row);
+      shown++;
+    }
   }
   results.replaceChildren(frag); // single bulk DOM swap
   results.scrollTop = 0;
 
   if (total === 0) {
     status.textContent = "no matches";
-  } else if (total > matches.length) {
-    status.textContent = `showing first ${matches.length} of ${total} matches`;
+  } else if (total > shown) {
+    status.textContent = `showing first ${shown} of ${total} matches`;
   } else {
     status.textContent = `${total} match${total === 1 ? "" : "es"}`;
   }

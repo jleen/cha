@@ -23,7 +23,11 @@ const EMBEDDED_WORDS: Option<&str> = None;
 const MAX_RESULTS: usize = 5000;
 
 struct Dict {
-    words: Vec<String>,
+    /// The loaded word lists, in display order (built-in first, then directory
+    /// files in sorted-name order). Each carries its friendly name so search can
+    /// tell the user which list a match came from. Dedup is global across lists
+    /// (first-seen wins), so a word appears under only one list.
+    lists: Vec<dictionary::NamedWordList>,
     /// A user-facing message (naming the exact path the word list should live
     /// at) when no list could be loaded, or `None` when the list is available.
     /// The front end shows this on startup so an empty result area isn't
@@ -40,10 +44,22 @@ struct MatchRow {
     extra: String,
 }
 
+/// The matches from a single word list, kept together so the front end can show
+/// them under a header naming the list. Only lists with at least one match get a
+/// group.
+#[derive(serde::Serialize)]
+struct MatchGroup {
+    list: String,
+    matches: Vec<MatchRow>,
+}
+
 #[derive(serde::Serialize)]
 struct SearchResult {
-    matches: Vec<MatchRow>,
+    groups: Vec<MatchGroup>,
     total: usize,
+    /// Number of word lists loaded (not just matched). The front end suppresses
+    /// per-list headers when this is 1, so a single-list setup looks unchanged.
+    list_count: usize,
     /// A gentle note for a contentless pattern (e.g. a bare `;`) — shown in the
     /// normal status style, never as a red error. Absent for ordinary patterns.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,33 +74,49 @@ struct SearchResult {
 #[tauri::command(async)]
 fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, String> {
     let pattern = pattern.trim();
+    let list_count = dict.lists.len();
     if pattern.is_empty() {
         return Ok(SearchResult {
-            matches: vec![],
+            groups: vec![],
             total: 0,
+            list_count,
             note: None,
         });
     }
     let compiled = pattern::compile_pattern_checked(pattern).map_err(|e| e.to_string())?;
     // A contentless pattern's matcher matches nothing, so the scan is a no-op;
     // the note carries through for the front end to display gently.
+    //
+    // Scan each list in order, keeping its matches together. `total` counts every
+    // match truthfully, but only the first `MAX_RESULTS` rows (across all lists)
+    // are materialized so a pattern like `*` can't flood the DOM.
     let mut total = 0usize;
-    let mut matches = Vec::new();
-    for word in &dict.words {
-        if let Some(info) = (compiled.matcher)(word) {
-            total += 1;
-            if matches.len() < MAX_RESULTS {
-                matches.push(MatchRow {
-                    word: word.clone(),
-                    unused: info.unused,
-                    extra: info.extra,
-                });
+    let mut groups = Vec::new();
+    for list in &dict.lists {
+        let mut matches = Vec::new();
+        for word in &list.words {
+            if let Some(info) = (compiled.matcher)(word) {
+                total += 1;
+                if total <= MAX_RESULTS {
+                    matches.push(MatchRow {
+                        word: word.clone(),
+                        unused: info.unused,
+                        extra: info.extra,
+                    });
+                }
             }
+        }
+        if !matches.is_empty() {
+            groups.push(MatchGroup {
+                list: list.name.clone(),
+                matches,
+            });
         }
     }
     Ok(SearchResult {
-        matches,
+        groups,
         total,
+        list_count,
         note: compiled.note,
     })
 }
@@ -275,6 +307,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
 fn load_dict(app: &tauri::AppHandle) -> Dict {
     let mut builder = dictionary::WordListBuilder::new();
     if let Some(text) = EMBEDDED_WORDS {
+        builder.begin_source("Built-in");
         builder.add_str(text);
     }
 
@@ -287,8 +320,8 @@ fn load_dict(app: &tauri::AppHandle) -> Dict {
         }
     }
 
-    let words = builder.finish();
-    let error = if words.is_empty() {
+    let lists = builder.finish_grouped();
+    let error = if lists.is_empty() {
         Some(match &dir {
             Some(dir) => format!(
                 "No word list found.\n\nAdd one or more dictionary files (plain \
@@ -302,7 +335,7 @@ fn load_dict(app: &tauri::AppHandle) -> Dict {
     } else {
         None
     };
-    Dict { words, error }
+    Dict { lists, error }
 }
 
 /// Concatenate every regular, non-hidden file in `dir` into `builder`, in sorted
@@ -323,10 +356,22 @@ fn load_dir_files(dir: &std::path::Path, builder: &mut dictionary::WordListBuild
         .collect();
     paths.sort();
     for path in &paths {
+        builder.begin_source(list_name(path));
         if let Err(e) = builder.add_file(path) {
             eprintln!("Cha: could not read {}: {e}", path.display());
         }
     }
+}
+
+/// A friendly display name for a dictionary file: its file name with the
+/// extension stripped (`scrabble.txt` -> `scrabble`). Falls back to the full
+/// file name, then to the whole path, if the stem can't be extracted.
+fn list_name(path: &std::path::Path) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Whether a path's file name begins with a dot (a dotfile on Unix; also filters

@@ -72,6 +72,26 @@ header {
   padding: 1px 0;
 }
 
+/* Unobtrusive section header naming the source word list. Reads as a labeled
+   horizontal rule: the name sits on a baseline border, muted and small. Extra
+   top margin sets each list apart; the first one's is trimmed so results don't
+   start with a gap. */
+.list-header {
+  margin: 16px 0 4px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.list-header:first-child {
+  margin-top: 4px;
+}
+
 /* Faint, smaller pool-difference annotation, inline to the right of the word. */
 .word-annot {
   color: var(--muted);

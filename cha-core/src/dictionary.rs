@@ -12,14 +12,42 @@ fn add_word(line: &str, seen: &mut HashSet<String>, words: &mut Vec<String>) {
     }
 }
 
+/// A named word list: the words that were first seen while a given source was
+/// active. The GUI uses these to label each source (built-in, or a file in the
+/// dictionary directory) and show which list a match came from.
+pub struct NamedWordList {
+    pub name: String,
+    pub words: Vec<String>,
+}
+
 /// Accumulates a word list from one or more sources (in-memory strings and/or
 /// files), trimming, lowercasing, and deduplicating *across* all of them while
 /// preserving first-seen order. The GUI uses this to merge the embedded list
 /// with any number of files the user drops in their dictionary directory.
-#[derive(Default)]
+///
+/// Words are grouped by *source*: each `begin_source` call starts a new named
+/// group, and subsequent `add_*` calls append to it. Dedup is still global
+/// (first-seen wins), so a word appears only under the first source that
+/// contained it. Callers that don't care about grouping never call
+/// `begin_source`; their words land in a single default group and `finish`
+/// returns them flat, exactly as before.
 pub struct WordListBuilder {
     seen: HashSet<String>,
-    words: Vec<String>,
+    sources: Vec<NamedWordList>,
+}
+
+impl Default for WordListBuilder {
+    fn default() -> Self {
+        // Start with one anonymous group so `add_*` works before any
+        // `begin_source` call (the flat, single-source path the CLI uses).
+        Self {
+            seen: HashSet::new(),
+            sources: vec![NamedWordList {
+                name: String::new(),
+                words: Vec::new(),
+            }],
+        }
+    }
 }
 
 impl WordListBuilder {
@@ -27,10 +55,23 @@ impl WordListBuilder {
         Self::default()
     }
 
-    /// Add every word from an in-memory string (e.g. the embedded list).
+    /// Begin a new named source. Subsequent `add_str`/`add_file` calls append to
+    /// it, and `finish_grouped` reports it (with its first-seen words) under this
+    /// name. Dedup remains global across every source.
+    pub fn begin_source(&mut self, name: impl Into<String>) {
+        self.sources.push(NamedWordList {
+            name: name.into(),
+            words: Vec::new(),
+        });
+    }
+
+    /// Add every word from an in-memory string (e.g. the embedded list). Words
+    /// land in the current source; there is always at least one, so `unwrap`
+    /// never panics.
     pub fn add_str(&mut self, text: &str) {
+        let words = &mut self.sources.last_mut().unwrap().words;
         for line in text.lines() {
-            add_word(line, &mut self.seen, &mut self.words);
+            add_word(line, &mut self.seen, words);
         }
     }
 
@@ -39,15 +80,28 @@ impl WordListBuilder {
     pub fn add_file(&mut self, path: &Path) -> io::Result<()> {
         let file = File::open(path)?;
         let reader = io::BufReader::new(file);
+        let words = &mut self.sources.last_mut().unwrap().words;
         for line in reader.lines() {
-            add_word(&line?, &mut self.seen, &mut self.words);
+            add_word(&line?, &mut self.seen, words);
         }
         Ok(())
     }
 
-    /// Consume the builder and return the deduplicated word list.
+    /// Consume the builder and return the deduplicated word list, flat: every
+    /// source's words concatenated in order. Dedup was already global, so this
+    /// matches the pre-grouping behavior.
     pub fn finish(self) -> Vec<String> {
-        self.words
+        self.sources.into_iter().flat_map(|s| s.words).collect()
+    }
+
+    /// Consume the builder and return the named sources in order, dropping any
+    /// that ended up empty (e.g. a list whose every word was already seen in an
+    /// earlier source).
+    pub fn finish_grouped(self) -> Vec<NamedWordList> {
+        self.sources
+            .into_iter()
+            .filter(|s| !s.words.is_empty())
+            .collect()
     }
 }
 
@@ -93,5 +147,26 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert_eq!(words, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn groups_by_source_with_global_dedup() {
+        // A word shared across sources appears only under the first source
+        // (first-seen wins), and a source whose every word was already seen is
+        // dropped entirely.
+        let mut builder = WordListBuilder::new();
+        builder.begin_source("Built-in");
+        builder.add_str("apple\nbanana\n");
+        builder.begin_source("extra");
+        builder.add_str("Apple\ncherry\n"); // "Apple" dups built-in; "cherry" new
+        builder.begin_source("all-dupes");
+        builder.add_str("banana\nCHERRY\n"); // both already seen -> dropped
+
+        let groups = builder.finish_grouped();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "Built-in");
+        assert_eq!(groups[0].words, vec!["apple", "banana"]);
+        assert_eq!(groups[1].name, "extra");
+        assert_eq!(groups[1].words, vec!["cherry"]);
     }
 }
