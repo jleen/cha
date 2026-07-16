@@ -168,21 +168,40 @@ one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
   `cookie 0.18.1` under rustc 1.96; 0.3.47 still satisfies plist's `^0.3.47`.
   Don't drop the pin (or let `cargo update` move it) until tauri/cookie or rustc
   resolves it.
-- **`icons/icon.ico` must keep its small entries (16/20/24), and `tauri icon`
-  destroys them.** The Windows title bar asks for a 16×16 icon (20 and 24 at
-  125%/150% DPI). With no exact match Windows falls back to crude-shrinking the
-  32×32, which looks visibly jagged — while the taskbar, which asks for 32×32 and
-  finds it, still looks fine. **That split (janky title bar, clean taskbar) is the
-  tell for a missing small entry**, not a corrupt icon. `tauri icon`'s generator
-  hardcodes `[32, 64, 128, 256]`, so re-running it silently drops the small sizes
-  and reintroduces the jaggies with no error. Regenerate from `icons/icon.png`
-  with Pillow instead — `save(dst, format="ICO", sizes=[(16,16), …])`, resampling
-  each frame with LANCZOS. Entries are PNG-compressed (smaller than BMP, and fine
-  on Win10+, which Tauri 2 requires anyway). The `.ico` is embedded into the exe's
-  resources at build time, so a rebuild is needed before any icon change is
-  visible. Note that 茶 is close to illegible at 16px no matter how it's
-  resampled — thickening the strokes before downscaling was tried and only made it
-  blobbier. Real crispness would need a hand-drawn 16×16 as its own entry.
+- **`icons/icon.ico` needs its small entries, and the 32px one must come first.**
+  Tauri's requirement: *"The ico file must include layers for 16, 24, 32, 48, 64
+  and 256 pixels. For an optimal display of the ICO image in development, the 32px
+  layer should be the first layer."* The first-layer rule is real — Tauri's icon
+  codegen reads the *first* directory entry, so a 16px-first `.ico` hands it the
+  16px art. Ours carries 16, 20, 24, 32, 48, 64, 128, 256 with **32 first**; 20
+  and 128 are additions beyond the required set (20 covers 125% DPI).
+- **Symptom to recognize:** a jagged title bar with a *clean* taskbar means a
+  missing small layer, not a corrupt icon. The title bar asks for 16×16 (20/24 at
+  125%/150% DPI) and crude-shrinks the 32×32 when there's no exact match; the
+  taskbar asks for 32×32, finds it, and looks fine. That asymmetry is the tell.
+  This is how the icon shipped between 9872cf3 and 8522493: it was hand-packed
+  from the four PNGs sitting in `icons/` (32/64/128/256), so 16/24/48 were never
+  in it.
+- **`tauri icon` is not the enemy here** — it emits 16/24/32/48/64/256, 32 first,
+  and is the documented path. It's avoided only because it also rewrites every
+  PNG and drops `Square*Logo.png` + `android/` + `ios/` into `icons/`, which this
+  project doesn't use, and it omits the 20px layer. If you regenerate by hand,
+  note **Pillow always writes the directory in ascending size order**
+  (`sorted(set(sizes))`), so the 32-first rule needs a post-pass that reorders the
+  16-byte directory entries — safe to do, since entries carry explicit offsets and
+  the image data doesn't move.
+- **`build.rs` must track `icons/icon.ico` explicitly.** The `.ico` is baked into
+  the exe's resources at build time, and `tauri_build` does *not* register it for
+  change detection. Worse, emitting *any* `rerun-if-changed` (this script emits
+  one for `words.txt`) makes that list exhaustive — cargo stops falling back to
+  "rerun if any file in the package changed". Without the explicit
+  `rerun-if-changed=icons/icon.ico`, editing the icon rebuilds **nothing**, not
+  even with a fresh mtime, and the exe silently keeps its old icon — which reads
+  as "my icon fix didn't work" when the real problem is that it was never
+  compiled in.
+- 茶 is close to illegible at 16px however it's resampled — thickening the strokes
+  before downscaling was tried and only made it blobbier. Real crispness needs a
+  hand-drawn 16×16 as its own entry.
 
 ### Which thread runs what (Tauri v2)
 

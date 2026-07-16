@@ -15,5 +15,11 @@ fn main() {
         println!("cargo::rustc-cfg=words_embedded");
     }
 
+    // Emitting any rerun-if-changed above makes the list exhaustive — cargo stops
+    // falling back to "rerun if any file in the package changed" — and
+    // tauri_build doesn't register the icons itself. Without this, editing
+    // icon.ico rebuilds nothing and the exe keeps its old icon resource.
+    println!("cargo::rerun-if-changed=icons/icon.ico");
+
     tauri_build::build()
 }
