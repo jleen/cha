@@ -229,10 +229,10 @@ fn open_pattern_syntax_window(app: &tauri::AppHandle) {
 /// menu is wired in via `Builder::menu` (not `App::set_menu`) so accelerators
 /// like Ctrl+N register on the initial window's accelerator table on Windows.
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    let mut menu = MenuBuilder::new(app);
+    let menu = MenuBuilder::new(app);
 
     #[cfg(target_os = "macos")]
-    {
+    let menu = {
         let app_menu = SubmenuBuilder::new(app, "Cha")
             .about(None)
             .separator()
@@ -244,8 +244,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
             .separator()
             .quit()
             .build()?;
-        menu = menu.item(&app_menu);
-    }
+        menu.item(&app_menu)
+    };
 
     let new_window = MenuItemBuilder::new("New Window")
         .id("new_window")
