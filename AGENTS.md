@@ -168,6 +168,21 @@ one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
   `cookie 0.18.1` under rustc 1.96; 0.3.47 still satisfies plist's `^0.3.47`.
   Don't drop the pin (or let `cargo update` move it) until tauri/cookie or rustc
   resolves it.
+- **`icons/icon.ico` must keep its small entries (16/20/24), and `tauri icon`
+  destroys them.** The Windows title bar asks for a 16×16 icon (20 and 24 at
+  125%/150% DPI). With no exact match Windows falls back to crude-shrinking the
+  32×32, which looks visibly jagged — while the taskbar, which asks for 32×32 and
+  finds it, still looks fine. **That split (janky title bar, clean taskbar) is the
+  tell for a missing small entry**, not a corrupt icon. `tauri icon`'s generator
+  hardcodes `[32, 64, 128, 256]`, so re-running it silently drops the small sizes
+  and reintroduces the jaggies with no error. Regenerate from `icons/icon.png`
+  with Pillow instead — `save(dst, format="ICO", sizes=[(16,16), …])`, resampling
+  each frame with LANCZOS. Entries are PNG-compressed (smaller than BMP, and fine
+  on Win10+, which Tauri 2 requires anyway). The `.ico` is embedded into the exe's
+  resources at build time, so a rebuild is needed before any icon change is
+  visible. Note that 茶 is close to illegible at 16px no matter how it's
+  resampled — thickening the strokes before downscaling was tried and only made it
+  blobbier. Real crispness would need a hand-drawn 16×16 as its own entry.
 
 ### Which thread runs what (Tauri v2)
 
