@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Lets the front end open additional search windows (Ctrl+N on Windows/Linux). Desktop only: mobile has no multiwindow.",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": ["main", "main-*"],
+  "permissions": ["core:webview:allow-create-webview-window"]
+}

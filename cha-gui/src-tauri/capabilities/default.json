@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the Cha main window.",
+  "description": "Default capability for Cha's search windows. All platforms.",
   "windows": ["main", "main-*", "pattern-syntax"],
-  "permissions": ["core:default", "core:webview:allow-create-webview-window"]
+  "permissions": ["core:default"]
 }

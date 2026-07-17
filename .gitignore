@@ -1,7 +1,12 @@
 target
 
-# Tauri's generated schemas (regenerated on build)
-cha-gui/src-tauri/gen/
+# Tauri's generated ACL schemas — rewritten on every build, one file per target.
+# Only gen/schemas is regenerated; the rest of gen/ (the Xcode and Gradle
+# projects from `tauri ios/android init`) is generated once and IS committed —
+# it holds the Kotlin activity, Info.plist, signing config, and mobile icons,
+# and `android init` isn't reproducible enough to regenerate on a clean
+# checkout. Those directories carry their own .gitignore for build outputs.
+cha-gui/src-tauri/gen/schemas/
 
 # Word list (supplied locally). The CLI loads it at runtime and the GUI embeds
 # it at build time, so place it at the repo root.
