@@ -2,25 +2,54 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <title>Cha</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header>
-      <input
-        id="pattern"
-        type="text"
-        placeholder="Enter a pattern ..."
-        autocomplete="off"
-        autocapitalize="off"
-        autocorrect="off"
-        spellcheck="false"
-        autofocus
-      />
+      <div class="input-row">
+        <input
+          id="pattern"
+          type="text"
+          placeholder="Enter a pattern ..."
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          autofocus
+        />
+        <!-- Mobile-only pattern-syntax affordance, unhidden by main.js when the
+             backend reports a mobile build. Desktop uses Help > Pattern Syntax
+             (a real resizable window) instead, so this stays hidden there. -->
+        <button
+          id="help"
+          type="button"
+          aria-label="Pattern syntax"
+          aria-haspopup="dialog"
+          hidden
+        >
+          ?
+        </button>
+      </div>
       <div id="status"></div>
     </header>
     <main id="results"></main>
+
+    <!-- Full-screen sheet showing the same static cheat sheet the desktop Help
+         menu opens in a window. An iframe means zero content duplication:
+         pattern-syntax.html is loaded unmodified. Hidden until "?" is tapped. -->
+    <div id="help-sheet" hidden>
+      <div class="help-bar">
+        <span class="help-title">Pattern Syntax</span>
+        <button id="help-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <iframe id="help-frame" title="Pattern Syntax"></iframe>
+    </div>
+
     <script src="main.js"></script>
   </body>
 </html>

@@ -5,6 +5,9 @@ const { invoke } = window.__TAURI__.core;
 const input = document.querySelector("#pattern");
 const results = document.querySelector("#results");
 const status = document.querySelector("#status");
+const helpBtn = document.querySelector("#help");
+const helpSheet = document.querySelector("#help-sheet");
+const helpFrame = document.querySelector("#help-frame");
 
 let timer;
 
@@ -35,24 +38,26 @@ async function checkDict() {
   notice.replaceChildren(text, button);
   results.replaceChildren(notice);
 }
-checkDict();
 
 input.addEventListener("input", () => {
   clearTimeout(timer);
   timer = setTimeout(run, 100); // debounce keystrokes
 });
 
-// On Windows/Linux the webview swallows Ctrl+N before the native menu's
-// accelerator can fire, so bind it here. macOS handles Cmd+N via the native menu
-// (the webview never sees it), so we skip it there to avoid opening two windows.
+// Bind Ctrl+N to open a new search window. On Windows/Linux the webview swallows
+// Ctrl+N before the native menu's accelerator can fire, so we handle it here;
+// macOS handles Cmd+N via the native menu (the webview never sees it), so it's
+// skipped there to avoid opening two windows. Multiwindow is desktop-only, so
+// this never runs on mobile.
 //
-// We create the window through Tauri's built-in WebviewWindow API rather than a
+// The window is created through Tauri's built-in WebviewWindow API rather than a
 // custom Rust command: Tauri schedules the creation on the event-loop thread for
 // us, avoiding the off-main-thread window-creation hang that a hand-rolled
-// command runs into on Windows.
-const { WebviewWindow } = window.__TAURI__.webviewWindow;
-const isMac = navigator.platform.toUpperCase().includes("MAC");
-if (!isMac) {
+// command runs into on Windows. The API is destructured inside this function
+// rather than at top level so a mobile bundle that omits it can't throw and kill
+// the whole script.
+function enableNewWindowShortcut() {
+  const { WebviewWindow } = window.__TAURI__.webviewWindow;
   window.addEventListener("keydown", (e) => {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === "n" || e.key === "N")) {
       e.preventDefault();
@@ -66,6 +71,49 @@ if (!isMac) {
     }
   });
 }
+
+// Open the pattern-syntax cheat sheet in a full-screen sheet. The iframe's src
+// is set lazily on first open, so desktop (which never opens it) never fetches
+// it. Pushing a history entry lets Android's hardware Back button close the sheet
+// instead of the app; the popstate handler below completes that.
+function openHelp() {
+  if (!helpFrame.src) helpFrame.src = "pattern-syntax.html";
+  helpSheet.hidden = false;
+  input.blur(); // dismiss the on-screen keyboard
+  history.pushState({ help: true }, "");
+}
+
+function closeHelp() {
+  if (helpSheet.hidden) return;
+  helpSheet.hidden = true;
+  // Undo our own history entry only if it's still on top, so Back and the ✕
+  // button converge on the same state.
+  if (history.state?.help) history.back();
+}
+
+helpBtn.addEventListener("click", openHelp);
+document.querySelector("#help-close").addEventListener("click", closeHelp);
+window.addEventListener("popstate", () => {
+  helpSheet.hidden = true;
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeHelp();
+});
+
+// Decide the platform-specific surface once at startup. `is_mobile` is compiled
+// truth from the backend (cfg!(mobile)), so we never guess from the user agent.
+async function init() {
+  const mobile = await invoke("is_mobile");
+  if (mobile) {
+    document.body.classList.add("mobile");
+    helpBtn.hidden = false;
+  } else {
+    const isMac = navigator.platform.toUpperCase().includes("MAC");
+    if (!isMac) enableNewWindowShortcut();
+  }
+  await checkDict();
+}
+init();
 
 async function run() {
   const pattern = input.value;

@@ -11,16 +11,28 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Stop Android WebView from auto-inflating text; no effect on desktop. */
+  -webkit-text-size-adjust: 100%;
+}
+
 html,
 body {
   margin: 0;
   height: 100%;
+  /* No rubber-band / pull-to-refresh on the app chrome. Nothing to chain on
+     desktop, so this is a mobile-only effect. */
+  overscroll-behavior: none;
 }
 
 body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* dvh tracks the dynamic viewport as the on-screen keyboard opens/closes; it
+     equals vh in a fixed desktop window, so the vh line above is just the
+     fallback for engines without dvh (iOS < 15.4 / old Android WebView). */
+  height: 100dvh;
   background: var(--bg);
   color: var(--fg);
   font-family: system-ui, -apple-system, sans-serif;
@@ -29,11 +41,25 @@ body {
 header {
   flex: 0 0 auto;
   padding: 12px;
+  /* env(safe-area-inset-*) is 0px on desktop, so these keep the input clear of
+     the notch / Dynamic Island / rounded corners on mobile at no desktop cost. */
+  padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  padding-left: calc(12px + env(safe-area-inset-left, 0px));
+  padding-right: calc(12px + env(safe-area-inset-right, 0px));
   border-bottom: 1px solid var(--border);
 }
 
+/* Row holding the input and (on mobile) the "?" help button. With the button
+   hidden — the desktop case — the input is the only child and fills the row, so
+   desktop layout is identical to the old width:100%. */
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 #pattern {
-  width: 100%;
+  flex: 1 1 auto;
   padding: 10px 12px;
   font-size: 18px;
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -62,7 +88,14 @@ header {
 #results {
   flex: 1 1 auto;
   overflow-y: auto;
+  /* Keep touch scrolling inside the list (no chaining to the document) and clear
+     the home indicator / rounded corners. All no-ops on desktop. */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 8px 12px;
+  padding-left: calc(12px + env(safe-area-inset-left, 0px));
+  padding-right: calc(12px + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 15px;
   line-height: 1.5;
@@ -137,4 +170,74 @@ header {
 .notice-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Mobile-only pattern-syntax affordance. 44x44 is the Apple/Google minimum
+   touch target. `hidden` (a display:none) keeps it out of the desktop layout
+   until main.js unhides it on a mobile build. */
+#help {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: #2a2a2a;
+  color: var(--muted);
+  font: 600 18px/1 system-ui, -apple-system, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#help[hidden] {
+  display: none;
+}
+
+/* Full-screen cheat-sheet overlay. The container carries the safe-area padding
+   because an iframe can't see its parent's env() insets — this is what keeps the
+   embedded pattern-syntax.html clear of the notch without editing its own CSS. */
+#help-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+    env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+#help-sheet[hidden] {
+  display: none;
+}
+
+.help-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 8px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#help-close {
+  width: 44px;
+  height: 44px;
+  background: none;
+  border: 0;
+  color: var(--fg);
+  font-size: 18px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#help-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 0;
 }
