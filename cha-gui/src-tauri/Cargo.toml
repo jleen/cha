@@ -3,6 +3,16 @@ name = "cha-gui"
 version = "0.4.0"
 edition = "2021"
 
+# Tauri mobile loads the app as a library from the platform shell (a staticlib
+# on iOS, a cdylib on Android), while the desktop binary links it as an rlib.
+# One `run()` in lib.rs serves all five platforms; main.rs is a thin shim. The
+# `_lib` name avoids a Windows bin/lib artifact collision (cargo#8519). The
+# crate-type can't be cfg-gated, so a desktop `cargo build -p cha-gui` links all
+# three; use `--bins` to skip the staticlib/cdylib when only the exe is wanted.
+[lib]
+name = "cha_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
