@@ -1,6 +1,15 @@
 [workspace]
 members = ["cha-core", "cha-gui/src-tauri"]
 
+# The matcher's hot loop scans ~270k words per query and is unusable when
+# compiled unoptimized — a debug `tauri android dev` / `ios dev` build (both
+# build debug by default) would make the app look broken and slander the
+# benchmarks. Optimize just this leaf crate even in dev builds; it has one small
+# dependency, so compile times barely move, and it speeds up desktop `cargo run`
+# too. Profiles are only honored from the workspace root.
+[profile.dev.package.cha-core]
+opt-level = 3
+
 [package]
 name = "cha"
 version = "0.4.0"
