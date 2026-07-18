@@ -11,3 +11,6 @@ cha-gui/src-tauri/gen/schemas/
 # Word list (supplied locally). The CLI loads it at runtime and the GUI embeds
 # it at build time, so place it at the repo root.
 words.txt
+
+# Personal Apple Development Team, sourced by Signing.xcconfig (never commit).
+cha-gui/src-tauri/gen/apple/Signing.local.xcconfig

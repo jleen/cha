@@ -1,0 +1,13 @@
+// Signing configuration for the iOS app.
+//
+// This committed file carries NO team ID. Your Apple Development Team is a
+// personal value, so it lives in Signing.local.xcconfig (git-ignored), which
+// this optionally includes. Create that file with one line:
+//
+//     DEVELOPMENT_TEAM = XXXXXXXXXX
+//
+// `cargo tauri ios open` (Xcode > Signing & Capabilities > Team) writes it into
+// the pbxproj; move that value here so a project regeneration doesn't lose it
+// and it never lands in git. With no team set, Simulator builds still work
+// (they need no signing); only device/TestFlight builds require it.
+#include? "Signing.local.xcconfig"

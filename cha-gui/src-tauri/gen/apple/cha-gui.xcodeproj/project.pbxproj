@@ -40,6 +40,7 @@
 		AE80CD700FDDCBAACF69D197 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		D921A49D9AC9135B4CA0E22A /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
 		DD2CD06C5446C8601CA6DB37 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		EFAA266A3ED77FC336CA698B /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		FF99B1AE45BF20FB197682E7 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -83,6 +84,7 @@
 				572A1EE2CD187A657C71E93A /* assets */,
 				16FAB649D9495B1698F63BF3 /* Assets.xcassets */,
 				DD2CD06C5446C8601CA6DB37 /* LaunchScreen.storyboard */,
+				92F7906619254F0CC813FDF8 /* apple */,
 				8602A6563616D9504EF334BC /* cha-gui_iOS */,
 				BAA9D63824AAF74C8855A747 /* Externals */,
 				9B2A8DE8AC178FC35C5C5FB7 /* Sources */,
@@ -115,6 +117,15 @@
 				9371A8738313C0E1CCDF14BD /* Info.plist */,
 			);
 			path = "cha-gui_iOS";
+			sourceTree = "<group>";
+		};
+		92F7906619254F0CC813FDF8 /* apple */ = {
+			isa = PBXGroup;
+			children = (
+				EFAA266A3ED77FC336CA698B /* Signing.xcconfig */,
+			);
+			name = apple;
+			path = .;
 			sourceTree = "<group>";
 		};
 		9B2A8DE8AC178FC35C5C5FB7 /* Sources */ = {
@@ -375,6 +386,7 @@
 		};
 		D627A22BFB857AB4F1AA9979 /* release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = EFAA266A3ED77FC336CA698B /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ARCHS = (
@@ -397,7 +409,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = org.saturnvalley.cha;
-				PRODUCT_NAME = "Cha";
+				PRODUCT_NAME = Cha;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
@@ -406,6 +418,7 @@
 		};
 		FDF02382E4F051DEF8466D8D /* debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = EFAA266A3ED77FC336CA698B /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ARCHS = (
@@ -428,7 +441,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = org.saturnvalley.cha;
-				PRODUCT_NAME = "Cha";
+				PRODUCT_NAME = Cha;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;

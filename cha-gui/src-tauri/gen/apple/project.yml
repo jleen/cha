@@ -55,6 +55,9 @@ targets:
         CFBundleVersion: "0.4.0"
     entitlements:
       path: cha-gui_iOS/cha-gui_iOS.entitlements
+    configFiles:
+      debug: Signing.xcconfig
+      release: Signing.xcconfig
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full

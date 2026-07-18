@@ -453,7 +453,14 @@ can't use most entitlements — Cha needs none, so it's fine.
 1. Plug in the iPhone, unlock, tap **Trust This Computer**, enter the passcode.
 2. `cargo tauri ios open` → Xcode → target → **Signing & Capabilities** → check
    *Automatically manage signing* → **Team** → *Add an Account* (your Apple ID) →
-   pick the Personal Team. This writes `DEVELOPMENT_TEAM` into the Xcode project.
+   pick the Personal Team. Xcode writes `DEVELOPMENT_TEAM` into the **pbxproj**,
+   which XcodeGen *regenerates from `project.yml`* on the next `cargo tauri ios`
+   command — so that edit isn't durable and would also commit your personal team
+   id. Move the value instead into **`gen/apple/Signing.local.xcconfig`**
+   (git-ignored) as `DEVELOPMENT_TEAM = XXXXXXXXXX`. `project.yml` references a
+   committed `Signing.xcconfig` (carrying no id) that `#include?`s the local file,
+   so the team survives regeneration, never lands in git, and a clone without the
+   local file still builds for the Simulator (which needs no signing).
 3. On the phone, enable **Developer Mode**: Settings → Privacy & Security →
    Developer Mode → on → restart. (Required on iOS 16+ to run dev-signed apps;
    the toggle only appears after a dev build has been targeted at the device.)
