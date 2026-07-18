@@ -12,5 +12,6 @@ cha-gui/src-tauri/gen/schemas/
 # it at build time, so place it at the repo root.
 words.txt
 
-# Personal Apple Development Team, sourced by Signing.xcconfig (never commit).
-cha-gui/src-tauri/gen/apple/Signing.local.xcconfig
+# Personal Apple Development Team, sourced by gen/apple/Signing.xcconfig via a
+# relative include (never commit). Kept at the repo root so it's easy to find.
+/Signing.local.xcconfig

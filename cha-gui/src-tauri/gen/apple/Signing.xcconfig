@@ -2,12 +2,17 @@
 //
 // This committed file carries NO team ID. Your Apple Development Team is a
 // personal value, so it lives in Signing.local.xcconfig (git-ignored), which
-// this optionally includes. Create that file with one line:
+// this optionally includes. That file sits at the REPO ROOT (four levels up
+// from here) — visible and hard to lose — not next to this file. Create it with
+// one line:
 //
 //     DEVELOPMENT_TEAM = XXXXXXXXXX
 //
-// `cargo tauri ios open` (Xcode > Signing & Capabilities > Team) writes it into
-// the pbxproj; move that value here so a project regeneration doesn't lose it
-// and it never lands in git. With no team set, Simulator builds still work
-// (they need no signing); only device/TestFlight builds require it.
-#include? "Signing.local.xcconfig"
+// `cargo tauri ios open` (Xcode > Signing & Capabilities > Team) writes the team
+// into the pbxproj; move that value into the root file so a project regeneration
+// doesn't lose it and it never lands in git. With no team set, Simulator builds
+// still work (they need no signing); only device/TestFlight builds require it.
+//
+// The include path is relative to THIS file's directory (gen/apple), so the
+// four `../` climb to the repo root; keep them in sync if this file ever moves.
+#include? "../../../../Signing.local.xcconfig"

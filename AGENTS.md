@@ -456,11 +456,14 @@ can't use most entitlements — Cha needs none, so it's fine.
    pick the Personal Team. Xcode writes `DEVELOPMENT_TEAM` into the **pbxproj**,
    which XcodeGen *regenerates from `project.yml`* on the next `cargo tauri ios`
    command — so that edit isn't durable and would also commit your personal team
-   id. Move the value instead into **`gen/apple/Signing.local.xcconfig`**
-   (git-ignored) as `DEVELOPMENT_TEAM = XXXXXXXXXX`. `project.yml` references a
-   committed `Signing.xcconfig` (carrying no id) that `#include?`s the local file,
-   so the team survives regeneration, never lands in git, and a clone without the
-   local file still builds for the Simulator (which needs no signing).
+   id. Move the value instead into **`Signing.local.xcconfig` at the repo root**
+   (git-ignored) as `DEVELOPMENT_TEAM = XXXXXXXXXX`. `gen/apple/Signing.xcconfig`
+   (committed, carrying no id) `#include?`s it by a relative `../../../../` climb
+   to the root, and `project.yml` references that xcconfig — so the team survives
+   regeneration, never lands in git, and a clone without the local file still
+   builds for the Simulator (which needs no signing). It's kept at the root, not
+   beside `Signing.xcconfig`, so it's visible and hard to lose; the four `../`
+   must stay in sync with `gen/apple`'s depth if the project layout moves.
 3. On the phone, enable **Developer Mode**: Settings → Privacy & Security →
    Developer Mode → on → restart. (Required on iOS 16+ to run dev-signed apps;
    the toggle only appears after a dev build has been targeted at the device.)
