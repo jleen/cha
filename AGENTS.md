@@ -438,6 +438,60 @@ startup stall — currently it doesn't, so the parse stays inline in `setup()` a
 `dict_status` stays sync. If that changes, moving the parse off-thread means
 `dict_status` must become `(async)` too, or it blocks the event loop.
 
+### Test deployment to a real device
+
+**The two platforms are not symmetric.** Android lets you build a self-signed APK
+and hand it to anyone. iOS binds every install to signing that authorizes a
+specific device or an App Store channel — there is no sideload-an-`.ipa`
+equivalent, and remote testing effectively requires the paid Apple Developer
+Program ($99/yr).
+
+**iOS, cabled local device (free, no paid account, your own phone only).** Good
+for a quick real-device smoke test. A free "Personal Team" signs apps that run
+only on a device cabled to (or paired with) your Mac, expire after 7 days, and
+can't use most entitlements — Cha needs none, so it's fine.
+1. Plug in the iPhone, unlock, tap **Trust This Computer**, enter the passcode.
+2. `cargo tauri ios open` → Xcode → target → **Signing & Capabilities** → check
+   *Automatically manage signing* → **Team** → *Add an Account* (your Apple ID) →
+   pick the Personal Team. This writes `DEVELOPMENT_TEAM` into the Xcode project.
+3. On the phone, enable **Developer Mode**: Settings → Privacy & Security →
+   Developer Mode → on → restart. (Required on iOS 16+ to run dev-signed apps;
+   the toggle only appears after a dev build has been targeted at the device.)
+4. `cargo tauri ios dev "<iPhone name>"` (it lists connected devices). First launch
+   may need Settings → General → VPN & Device Management → *Developer App* → Trust.
+5. Re-run to refresh before the 7-day signature expires.
+
+**iOS, remote tester → TestFlight (paid).** Register the app id
+`org.saturnvalley.cha` in App Store Connect; set your real Team in the Xcode
+project; **bump the version** (App Store Connect rejects a duplicate
+`CFBundleVersion`, and Tauri derives it from the crate version, so bump the patch
+in the root `Cargo.toml`); archive & upload via the Xcode Organizer (Product →
+Archive → Distribute → TestFlight) or `cargo tauri ios build --export-method
+app-store-connect` + the Transporter app. Add the tester in TestFlight (internal
+= instant; external = one-time Beta App Review). `gen/apple/ExportOptions.plist`
+starts as `method: debugging`; `--export-method` rewrites it — don't hand-edit.
+
+**Android, remote tester → signed APK.** The generated `release` build type has
+**no signing config**, so `cargo tauri android build --apk` emits an *unsigned*
+release APK that won't install. Either ship a **debug APK** (auto-signed with the
+debug key, installs by sideload, matcher still fast thanks to the `cha-core`
+opt-level profile), or sign a release APK yourself without touching the committed
+Gradle files:
+```
+keytool -genkeypair -v -keystore ~/keystores/cha-release.jks -alias cha \
+  -keyalg RSA -keysize 2048 -validity 10000                    # once
+cargo tauri android build --apk --target aarch64               # arm64 = modern phones
+"$ANDROID_HOME/build-tools/34.0.0/zipalign" -f 4 \
+  gen/android/app/build/outputs/apk/arm64/release/app-arm64-release-unsigned.apk /tmp/a.apk
+"$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
+  --ks ~/keystores/cha-release.jks --out cha.apk /tmp/a.apk
+```
+Get it on the phone with `adb install cha.apk` (USB debugging) or just send the
+file. **Updates must keep the same signing key and a higher `versionCode`** (also
+crate-version-derived), or Android refuses the install. Scaling past one tester
+is Play Console internal testing, which wants an **AAB** (`--aab`), not an APK.
+Omitting `--target` builds a ~130 MB universal APK (all four ABIs).
+
 ## What to avoid
 
 - Do not allocate `Vec<char>` or `String` on the per-word *reject* path of the
