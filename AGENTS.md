@@ -468,6 +468,18 @@ can't use most entitlements — Cha needs none, so it's fine.
    may need Settings → General → VPN & Device Management → *Developer App* → Trust.
 5. Re-run to refresh before the 7-day signature expires.
 
+**iOS, building from Xcode's GUI.** Xcode launched from the Dock/Finder runs
+with a minimal launchd `PATH` that lacks `~/.cargo/bin`, so the "Build Rust Code"
+phase fails with *"Cargo: command not found"* — even though `cargo tauri ios …`
+works in a terminal (whose shell `PATH` has it). The fix lives in
+`gen/apple/project.yml`'s `preBuildScripts`, which prepends
+`export PATH="$HOME/.cargo/bin:$PATH"` before calling `cargo tauri ios
+xcode-script`. Keep it there (XcodeGen bakes it into the pbxproj on regeneration);
+without it, only terminal builds work. For a standalone on-device build that
+survives unplugging, prefer `cargo tauri ios dev --release --no-watch "<device>"`
+— it installs a release build directly and sidesteps `ios run`'s broken
+IPA-export step (`Couldn't load -exportOptionsPlist … no such file`).
+
 **iOS, remote tester → TestFlight (paid).** Register the app id
 `org.saturnvalley.cha` in App Store Connect; set your real Team in the Xcode
 project; **bump the version** (App Store Connect rejects a duplicate
