@@ -5,7 +5,7 @@
 //! only on desktop.
 
 use cha_core::dictionary;
-use cha_core::pattern;
+use cha_core::search;
 use tauri::Manager;
 
 #[cfg(desktop)]
@@ -22,10 +22,6 @@ const EMBEDDED_WORDS: Option<&str> = Some(include_str!("../../../words.txt"));
 #[cfg(not(words_embedded))]
 const EMBEDDED_WORDS: Option<&str> = None;
 
-/// Upper bound on results returned to the front end. A pattern like `*` matches
-/// the whole list (~270k words); returning all of them would flood the DOM.
-const MAX_RESULTS: usize = 5000;
-
 struct Dict {
     /// The loaded word lists, in display order (built-in first, then directory
     /// files in sorted-name order). Each carries its friendly name so search can
@@ -39,90 +35,19 @@ struct Dict {
     error: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-struct MatchRow {
-    word: String,
-    /// Pool letters not used by the word, e.g. "D". Empty if none.
-    unused: String,
-    /// Word letters not in the pool, e.g. "HT". Empty if none.
-    extra: String,
-}
-
-/// The matches from a single word list, kept together so the front end can show
-/// them under a header naming the list. Only lists with at least one match get a
-/// group.
-#[derive(serde::Serialize)]
-struct MatchGroup {
-    list: String,
-    matches: Vec<MatchRow>,
-}
-
-#[derive(serde::Serialize)]
-struct SearchResult {
-    groups: Vec<MatchGroup>,
-    total: usize,
-    /// Number of word lists loaded (not just matched). The front end suppresses
-    /// per-list headers when this is 1, so a single-list setup looks unchanged.
-    list_count: usize,
-    /// A gentle note for a contentless pattern (e.g. a bare `;`) — shown in the
-    /// normal status style, never as a red error. Absent for ordinary patterns.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<String>,
-}
-
 // `(async)` runs this on Tauri's worker thread pool rather than the main thread.
 // Scanning the full word list (~270k entries) takes long enough that running it
 // on the main thread would freeze the window — no typing, no repaint — until it
 // returned. `Dict` is `Send + Sync`, so `State` access off-thread is safe. The
 // body stays synchronous; there are no await points.
+//
+// The scan itself lives in `cha_core::search` so the web server's HTTP handler
+// runs exactly the same code — including the wire types, which are defined once
+// there and so can't drift between the two transports.
 #[tauri::command(async)]
-fn search(pattern: String, dict: tauri::State<Dict>) -> Result<SearchResult, String> {
-    let pattern = pattern.trim();
-    let list_count = dict.lists.len();
-    if pattern.is_empty() {
-        return Ok(SearchResult {
-            groups: vec![],
-            total: 0,
-            list_count,
-            note: None,
-        });
-    }
-    let compiled = pattern::compile_pattern_checked(pattern).map_err(|e| e.to_string())?;
-    // A contentless pattern's matcher matches nothing, so the scan is a no-op;
-    // the note carries through for the front end to display gently.
-    //
-    // Scan each list in order, keeping its matches together. `total` counts every
-    // match truthfully, but only the first `MAX_RESULTS` rows (across all lists)
-    // are materialized so a pattern like `*` can't flood the DOM.
-    let mut total = 0usize;
-    let mut groups = Vec::new();
-    for list in &dict.lists {
-        let mut matches = Vec::new();
-        for word in &list.words {
-            if let Some(info) = (compiled.matcher)(word) {
-                total += 1;
-                if total <= MAX_RESULTS {
-                    matches.push(MatchRow {
-                        word: word.clone(),
-                        unused: info.unused,
-                        extra: info.extra,
-                    });
-                }
-            }
-        }
-        if !matches.is_empty() {
-            groups.push(MatchGroup {
-                list: list.name.clone(),
-                matches,
-            });
-        }
-    }
-    Ok(SearchResult {
-        groups,
-        total,
-        list_count,
-        note: compiled.note,
-    })
+fn search(pattern: String, dict: tauri::State<Dict>) -> Result<search::SearchResult, String> {
+    search::search(&dict.lists, &pattern, &search::SearchLimits::interactive())
+        .map_err(|e| e.to_string())
 }
 
 /// Returns a user-facing message when no word list could be loaded, else `None`.

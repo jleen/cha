@@ -18,7 +18,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-cha-core = { path = "../../cha-core" }
+# `serde` is required, not optional, here: the search wire types cross the IPC
+# boundary to the front end, so they must serialize.
+cha-core = { path = "../../cha-core", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 
 # Pin transitive `time` to 0.3.47: 0.3.48 trips an E0119 coherence false-positive

@@ -382,6 +382,7 @@ name = "cha-core"
 version = "0.3.0"
 dependencies = [
  "fancy-regex",
+ "serde",
 ]
 
 [[package]]

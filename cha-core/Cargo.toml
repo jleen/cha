@@ -9,3 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 fancy-regex = "0"
+# Only the GUI and web front ends serialize search results; the CLI formats them
+# itself. Keeping serde optional keeps `cargo build -p cha` free of serde_derive
+# and keeps this crate the small leaf the root Cargo.toml's `opt-level = 3`
+# profile assumes. (Feature unification means a `--workspace` build compiles it
+# with serde on regardless, so the saving is real only for the CLI alone.)
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]
