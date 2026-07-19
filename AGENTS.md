@@ -487,6 +487,17 @@ class, or a CSS rule that is a literal no-op on desktop.
   `window.__TAURI__.webviewWindow` destructure lives *inside* the desktop branch,
   not at top level, so a mobile bundle that omits it can't throw and kill the
   whole script.
+- **The help sheet's iframe must be navigated with `location.replace`, never by
+  assigning `src`.** Assigning `src` commits asynchronously and adds an entry to
+  the *joint session history*, which lands after `openHelp`'s `pushState` (that
+  runs synchronously on the same tick). `closeHelp`'s `history.back()` then
+  returns to the entry where the iframe was still `about:blank`, so the sheet is
+  blank on every subsequent open until a full page reload. `replace()`
+  contributes no history entry, which removes the ordering problem rather than
+  racing it. Confirmed in headless Firefox — with `src` the iframe reads
+  `about:blank` immediately after the first close; with `replace` it keeps its
+  content across open/close/open. If you ever need to reload the sheet, keep
+  using `replace` and reset the `helpLoaded` flag.
 - **Transport is chosen separately from platform, and the distinction matters.**
   [`transport.js`](cha-gui/ui/transport.js) sets `window.chaInvoke` to either
   Tauri's `invoke` or an HTTP `POST /api/<command>`, deciding by testing for

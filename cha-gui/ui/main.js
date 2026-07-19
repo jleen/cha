@@ -105,13 +105,29 @@ function enableNewWindowShortcut() {
   });
 }
 
-// Open the pattern-syntax cheat sheet in a full-screen sheet. The iframe's src
-// is set lazily on first open, so desktop (which never opens it) never fetches
-// it. Pushing a history entry lets Android's hardware Back button close the sheet
-// instead of the app; the popstate handler below completes that.
+// Whether the cheat sheet has been loaded into the iframe. An explicit flag
+// rather than testing `helpFrame.src`, because the load below deliberately
+// doesn't set it.
+let helpLoaded = false;
+
+// Open the pattern-syntax cheat sheet in a full-screen sheet. Loaded lazily on
+// first open, so desktop (which never opens it) never fetches it. Pushing a
+// history entry lets Android's hardware Back button close the sheet instead of
+// the app; the popstate handler below completes that.
+//
+// The iframe MUST be navigated with `location.replace`, not by assigning `src`.
+// Assigning `src` commits asynchronously and adds an entry to the *joint*
+// session history — which lands after the `pushState` below, since that runs
+// synchronously on the same tick. `history.back()` in closeHelp then returns to
+// the entry where the iframe was still about:blank, so the sheet is blank on
+// every subsequent open until a full page reload. `replace()` navigates without
+// contributing a history entry at all, which sidesteps the ordering entirely.
 function openHelp() {
-  if (!helpFrame.src) helpFrame.src = "pattern-syntax.html";
   helpSheet.hidden = false;
+  if (!helpLoaded) {
+    helpFrame.contentWindow.location.replace("pattern-syntax.html");
+    helpLoaded = true;
+  }
   input.blur(); // dismiss the on-screen keyboard
   history.pushState({ help: true }, "");
 }
