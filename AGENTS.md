@@ -389,30 +389,57 @@ class, or a CSS rule that is a literal no-op on desktop.
   (tauri-macros re-emits the attr onto the generated match arm). This keeps one
   handler list instead of two divergent copies. If it ever breaks, the fallback
   is two `#[cfg]`'d `.invoke_handler(...)` calls.
-- **`is_mobile` is the front end's only source of platform truth.** Its body is
-  `cfg!(mobile)` — an *expression*, so one command serves both platforms. The
-  front end (`init()` in [`main.js`](cha-gui/ui/main.js)) awaits it once at
-  startup and either shows the mobile help button or installs the desktop Ctrl+N
-  handler. **Don't** UA-sniff (iPadOS WKWebView reports ambiguously) and **don't**
-  infer platform from `@media (pointer: coarse)` (a touch laptop matches it —
-  that's a touch question, not a platform question). Also note the
+- **`platform` is the front end's only source of platform truth.** Its body is
+  `if cfg!(mobile) { "mobile" } else { "desktop" }` — an *expression*, so one
+  command serves both platforms — and `cha-web` returns `"web"` from its own
+  handler. Those three strings are the only values the front end understands. It
+  returns a string rather than the old `is_mobile` boolean because web wants the
+  mobile help affordance (a browser tab has no menu bar we control) while not
+  being mobile, which a boolean can't express. The front end (`init()` in
+  [`main.js`](cha-gui/ui/main.js)) awaits it once at startup and drives the help
+  button, the Ctrl+N handler, the submission model, and the
+  "Open Dictionary Folder" gate off it. **Don't** UA-sniff (iPadOS WKWebView
+  reports ambiguously) and **don't** infer platform from
+  `@media (pointer: coarse)` (a touch laptop matches it — that's a touch
+  question, not a platform question). Also note the
   `window.__TAURI__.webviewWindow` destructure lives *inside* the desktop branch,
   not at top level, so a mobile bundle that omits it can't throw and kill the
   whole script.
+- **Transport is chosen separately from platform, and the distinction matters.**
+  [`transport.js`](cha-gui/ui/transport.js) sets `window.chaInvoke` to either
+  Tauri's `invoke` or an HTTP `POST /api/<command>`, deciding by testing for
+  `window.__TAURI__`. That looks like the UA-sniffing the rule above forbids and
+  isn't: it asks "is the IPC bridge present in *this document*", a directly
+  observable fact about how the page loaded, not a guess about the machine. The
+  two questions are genuinely independent — a desktop browser hitting `cha-web`
+  has the HTTP transport and is not a phone. Keep them separate.
+  The shim must reject with a **bare string**, not an `Error`: Tauri rejects with
+  the command's `Err` value and `main.js` renders failures via `String(e)`, so an
+  `Error` would render as "Error: msg" on web only. That contract is pinned by
+  [`ui/tests/`](cha-gui/ui/tests/) — run `cha-gui/ui/tests/run.sh`. It uses
+  whatever JS engine is around (macOS ships JavaScriptCore; node works too) and
+  **skips with exit 0 when neither is present**, so it can never fail a build. No
+  CI job invokes it today; run it by hand when touching `transport.js`.
 - **Mobile is embedded-only by construction, and that's enforced, not hoped.**
   `build.rs` hard-errors on an `android`/`ios` target with no `words.txt` (via
-  `CARGO_CFG_TARGET_OS`). That guarantee is what lets the front end skip gating
-  the "Open Dictionary Folder" notice button: on mobile `dict_status` can't return
-  a message (the embedded list is always non-empty), so the button is unreachable
-  rather than conditionally hidden. Adding user lists on mobile would need a
+  `CARGO_CFG_TARGET_OS`). On mobile `dict_status` therefore can't return a
+  message (the embedded list is always non-empty), so the empty-dictionary notice
+  is unreachable there. The notice's "Open Dictionary Folder" button is
+  nonetheless **explicitly gated on `platform === "desktop"`** now, rather than
+  relying on that unreachability: `open_dict_dir` is a `#[cfg(desktop)]` command,
+  and on web the notice *is* reachable in principle while the dictionary lives on
+  a server the user can't browse. Adding user lists on mobile would need a
   file-picker plugin and a real design — don't half-do it.
 - **Mobile CSS is additive by construction.** In
   [`styles.css`](cha-gui/ui/styles.css), `env(safe-area-inset-*)` is `0px` and
   `100dvh == 100vh` on desktop, so the safe-area/viewport rules ship
   unconditionally and cost desktop nothing — no class, no cfg, no first-paint
-  flash. The `.mobile` class and `is_mobile` gate only real behavior (the help
-  button, the Ctrl+N handler). Keep it that way: a rule that needs `.mobile` to
-  *avoid* breaking desktop is written wrong. `viewport-fit=cover` on the viewport
+  flash. `init()` sets the platform name as a body class (`desktop` / `mobile` /
+  `web`) and `platform` gates only real behavior (the help button, the Ctrl+N
+  handler, the submission model). Keep it that way: a rule that needs `.mobile`
+  to *avoid* breaking desktop is written wrong. The one class-scoped rule today
+  is `body.web`'s `max-width`, which exists because a browser window is far wider
+  than the app's 720px — additive, and invisible to the two app targets. `viewport-fit=cover` on the viewport
   meta is required for the insets to be non-zero and is a desktop no-op.
 - **`#pattern` must stay ≥16px** (it's 18px). iOS zooms the page when a focused
   `<input>` is under 16px, and the zoom doesn't cleanly undo. This looks like a

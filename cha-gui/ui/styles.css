@@ -172,9 +172,38 @@ header {
   outline-offset: 2px;
 }
 
-/* Mobile-only pattern-syntax affordance. 44x44 is the Apple/Google minimum
-   touch target. `hidden` (a display:none) keeps it out of the desktop layout
-   until main.js unhides it on a mobile build. */
+/* Explicit-submit button, shown only on the web build. Height matches #help's
+   44px touch target so the two sit level beside the input. `hidden` keeps it out
+   of the layout entirely on the local apps, which search as you type. */
+#go {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: var(--fg);
+  font: 600 15px/1 system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#go:hover {
+  border-color: var(--accent);
+}
+
+#go:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#go[hidden] {
+  display: none;
+}
+
+/* Pattern-syntax affordance for mobile and web. 44x44 is the Apple/Google
+   minimum touch target. `hidden` (a display:none) keeps it out of the desktop
+   layout until main.js unhides it. */
 #help {
   flex: 0 0 auto;
   width: 44px;
@@ -240,4 +269,14 @@ header {
   flex: 1 1 auto;
   width: 100%;
   border: 0;
+}
+
+/* Web only. A browser window is far wider than the app's 720px, and an unbounded
+   column of five-letter words is unreadable at that width. Scoped to body.web
+   (the class main.js sets from the backend's `platform`) so the desktop and
+   mobile app layouts stay byte-for-byte what they were. */
+body.web header > *,
+body.web #results {
+  max-width: 48em;
+  margin-inline: auto;
 }

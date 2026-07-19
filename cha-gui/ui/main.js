@@ -1,6 +1,6 @@
-// `withGlobalTauri` exposes the API on window.__TAURI__, so the vanilla front
-// end can call Rust commands without a bundler or imports.
-const { invoke } = window.__TAURI__.core;
+// Set by transport.js, which picks IPC or HTTP depending on how this page was
+// loaded. Same signature either way; nothing below cares which.
+const invoke = window.chaInvoke;
 
 const input = document.querySelector("#pattern");
 const results = document.querySelector("#results");
@@ -8,6 +8,18 @@ const status = document.querySelector("#status");
 const helpBtn = document.querySelector("#help");
 const helpSheet = document.querySelector("#help-sheet");
 const helpFrame = document.querySelector("#help-frame");
+const goBtn = document.querySelector("#go");
+
+// How each surface submits a query. Web is the only one where a keystroke costs
+// a network round trip and a JSON payload, so it waits for an explicit submit;
+// the local apps search live as you type. Switching web to live search is a
+// one-line change here (`live: true` with a longer debounce) — nothing else
+// needs to move, and #go simply stays hidden.
+const SUBMISSION = {
+  desktop: { live: true, debounceMs: 100 },
+  mobile: { live: true, debounceMs: 100 },
+  web: { live: false, debounceMs: 350 },
+};
 
 let timer;
 
@@ -21,7 +33,7 @@ let latestSearch = 0;
 // On startup, ask the backend whether a word list is available. If not, show a
 // friendly notice (with the exact path the file belongs at) and disable input,
 // so an empty result area isn't mistaken for "no matches".
-async function checkDict() {
+async function checkDict(platform) {
   const message = await invoke("dict_status");
   if (!message) return;
   input.disabled = true;
@@ -31,18 +43,39 @@ async function checkDict() {
   const text = document.createElement("div");
   text.className = "notice-text";
   text.textContent = message;
-  const button = document.createElement("button");
-  button.className = "notice-button";
-  button.textContent = "Open Dictionary Folder";
-  button.addEventListener("click", () => invoke("open_dict_dir"));
-  notice.replaceChildren(text, button);
+  notice.replaceChildren(text);
+  // `open_dict_dir` is a desktop-only command: mobile has no file manager and no
+  // config dir, and on web the dictionary lives on the server where the user has
+  // no business browsing. Offering the button anywhere else would reject.
+  if (platform === "desktop") {
+    const button = document.createElement("button");
+    button.className = "notice-button";
+    button.textContent = "Open Dictionary Folder";
+    button.addEventListener("click", () => invoke("open_dict_dir"));
+    notice.appendChild(button);
+  }
   results.replaceChildren(notice);
 }
 
-input.addEventListener("input", () => {
-  clearTimeout(timer);
-  timer = setTimeout(run, 100); // debounce keystrokes
-});
+// Wire up whichever submission model this surface uses. Called once at startup.
+function configureSubmission(platform) {
+  const { live, debounceMs } = SUBMISSION[platform];
+  if (live) {
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(run, debounceMs); // debounce keystrokes
+    });
+  } else {
+    goBtn.hidden = false;
+    goBtn.addEventListener("click", run);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        run();
+      }
+    });
+  }
+}
 
 // Bind Ctrl+N to open a new search window. On Windows/Linux the webview swallows
 // Ctrl+N before the native menu's accelerator can fire, so we handle it here;
@@ -100,18 +133,26 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeHelp();
 });
 
-// Decide the platform-specific surface once at startup. `is_mobile` is compiled
-// truth from the backend (cfg!(mobile)), so we never guess from the user agent.
+// Decide the platform-specific surface once at startup. `platform` is compiled
+// truth from the backend ("desktop" | "mobile" | "web"), so we never guess from
+// the user agent.
 async function init() {
-  const mobile = await invoke("is_mobile");
-  if (mobile) {
-    document.body.classList.add("mobile");
-    helpBtn.hidden = false;
-  } else {
-    const isMac = navigator.platform.toUpperCase().includes("MAC");
-    if (!isMac) enableNewWindowShortcut();
+  const platform = await invoke("platform");
+  document.body.classList.add(platform);
+
+  // The pattern-syntax cheat sheet needs an in-page affordance wherever there's
+  // no native menu bar to hang it off: mobile has none, and in a browser tab we
+  // don't control one. Only the desktop app routes it through Help > Pattern
+  // Syntax, so only desktop hides the button.
+  if (platform !== "desktop") helpBtn.hidden = false;
+
+  // Multiwindow is desktop-only, and macOS handles Cmd+N natively (see below).
+  if (platform === "desktop" && !navigator.platform.toUpperCase().includes("MAC")) {
+    enableNewWindowShortcut();
   }
-  await checkDict();
+
+  configureSubmission(platform);
+  await checkDict(platform);
 }
 init();
 

@@ -57,14 +57,23 @@ fn dict_status(dict: tauri::State<Dict>) -> Option<String> {
     dict.error.clone()
 }
 
-/// Whether this is a mobile build. `cfg!` is an *expression*, so a single
-/// command serves both platforms — the answer is decided at compile time, not
-/// sniffed from a user-agent (iPadOS WKWebView reports ambiguously) or inferred
-/// from touch capability (a touch laptop is still desktop). The front end uses
-/// this to show the mobile help affordance and skip the desktop Ctrl+N handler.
+/// Which surface the front end should present. `cfg!` is an *expression*, so a
+/// single command serves both platforms — the answer is decided at compile time,
+/// not sniffed from a user-agent (iPadOS WKWebView reports ambiguously) or
+/// inferred from touch capability (a touch laptop is still desktop).
+///
+/// A string rather than the old `is_mobile` boolean because there is now a third
+/// answer: `cha-web` serves the same front end over HTTP and returns `"web"`
+/// from its own handler. Web wants the mobile help affordance (a browser tab has
+/// no menu bar we control) but is not mobile, so a boolean can't express it.
+/// These three values are the only ones the front end understands.
 #[tauri::command]
-fn is_mobile() -> bool {
-    cfg!(mobile)
+fn platform() -> &'static str {
+    if cfg!(mobile) {
+        "mobile"
+    } else {
+        "desktop"
+    }
 }
 
 /// Build the dictionary by starting from the embedded list (when present at
@@ -121,7 +130,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search,
             dict_status,
-            is_mobile,
+            platform,
             #[cfg(desktop)]
             desktop::open_dict_dir
         ])

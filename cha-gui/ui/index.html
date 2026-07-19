@@ -22,9 +22,15 @@
           spellcheck="false"
           autofocus
         />
-        <!-- Mobile-only pattern-syntax affordance, unhidden by main.js when the
-             backend reports a mobile build. Desktop uses Help > Pattern Syntax
-             (a real resizable window) instead, so this stays hidden there. -->
+        <!-- Explicit-submit affordance for the web build, where every keystroke
+             would otherwise cost a network round trip. Unhidden by
+             configureSubmission(); the local apps search live and never show
+             it. -->
+        <button id="go" type="button" hidden>Search</button>
+        <!-- Pattern-syntax affordance for every surface without a native menu
+             bar — mobile and web. Unhidden by main.js from the backend's
+             `platform`. Desktop uses Help > Pattern Syntax (a real resizable
+             window) instead, so this stays hidden there. -->
         <button
           id="help"
           type="button"
@@ -50,6 +56,8 @@
       <iframe id="help-frame" title="Pattern Syntax"></iframe>
     </div>
 
+    <!-- Must precede main.js: it defines window.chaInvoke. -->
+    <script src="transport.js"></script>
     <script src="main.js"></script>
   </body>
 </html>
