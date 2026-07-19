@@ -537,14 +537,20 @@ signed Android APK + AAB to a (draft) GitHub release.
   "ndk;<NDK_VERSION>"` → rust-toolchain with the 4 android targets → cargo-binstall
   tauri-cli → decode `ANDROID_KEYSTORE_BASE64` + write `keystore.properties` from
   secrets → `cargo tauri android build --apk --aab`.
-- **iOS job** (`macos-latest`): **build-check only** — `cargo tauri ios build
-  --target aarch64-sim --no-sign` builds the Simulator `.app` with **no signing,
-  no secrets** (the Simulator target skips IPA export, also dodging the `ios
-  build`/`run` export-plist bug). Producing a *distributable* iOS build later
-  (TestFlight) is the paid-tier add: it needs `IOS_CERTIFICATE` /
-  `IOS_CERTIFICATE_PASSWORD` / `IOS_MOBILE_PROVISION` plus the existing
-  `APPLE_API_*` App Store Connect key, and a `--export-method app-store-connect`
-  build + upload — deliberately deferred.
+- **iOS job** (`macos-latest`): **build-check only** — `cargo build -p cha-gui
+  --lib --target aarch64-apple-ios` cross-compiles the shared library with **no
+  Xcode archive, no signing, no secrets**. `cargo tauri ios build` was tried first
+  but it always *archives* (device), which needs a signing team CI doesn't have
+  (the repo-root `Signing.local.xcconfig` is git-ignored) — so it fails on the
+  runner even with `--no-sign`/a Simulator target, and only "worked" locally
+  because this Mac has a cert. The cross-compile catches the breakage that matters
+  (the shared Rust code building for iOS), is arch-agnostic, and needs macOS only
+  because the iOS SDK is Xcode-only. Producing a *signed* iOS build (let alone
+  TestFlight) is the paid-tier follow-up: iOS needs an **iOS-type** cert (Apple
+  Development/Distribution — the macOS `APPLE_*`/Developer ID secrets can't sign
+  iOS) plus a provisioning profile or App Store Connect API-key automatic signing,
+  then `cargo tauri ios build --archive-only` (sign, no upload) or
+  `--export-method app-store-connect` (TestFlight). Deliberately deferred.
 - **`words.txt` in CI:** it's git-ignored and `build.rs` hard-errors without it,
   and it's too big (639 KB) for a 48 KB GitHub secret. Both jobs run a
   "materialize words.txt" step: **`WORDS_URL` secret if set, else the committed
