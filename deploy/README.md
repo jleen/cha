@@ -113,4 +113,10 @@ binary). `CHA_NO_EMBED_WORDS=1` is set in the Dockerfile so the image never bake
 in a word list even if `words.txt` is present in your checkout.
 
 The release workflow publishes `ghcr.io/<owner>/cha-web` for `linux/amd64` and
-`linux/arm64` on every `v*` tag.
+`linux/arm64` on every `v*` tag. Both are **cross-compiled** on an amd64 runner
+rather than emulated under QEMU, so the arm64 image costs about as much to build
+as the amd64 one. Building arm64 on an amd64 machine locally works the same way:
+
+```sh
+docker buildx build --platform linux/arm64 -f deploy/Dockerfile -t cha-web:arm64 .
+```

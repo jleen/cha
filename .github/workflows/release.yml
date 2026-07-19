@@ -18,11 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # arm64 is built under QEMU emulation, which is slow for Rust — expect the
-      # arm64 leg to dominate this job's runtime. If that becomes annoying,
-      # the alternatives are dropping arm64 or cross-compiling in the builder
-      # stage with an aarch64 linker.
-      - uses: docker/setup-qemu-action@v3
+      # No setup-qemu-action: deploy/Dockerfile pins its builder stage to
+      # BUILDPLATFORM and cross-compiles, so both architectures are built
+      # natively on this amd64 runner. Adding QEMU back would silently do
+      # nothing — the Dockerfile never asks to be emulated.
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR

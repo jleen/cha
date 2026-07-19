@@ -9,12 +9,48 @@
 # CHA_DICT_DIR at it. See deploy/README.md.
 
 # ---- build ------------------------------------------------------------------
-FROM rust:1-bookworm AS builder
+# `--platform=$BUILDPLATFORM` pins the builder to the machine doing the building
+# and cross-compiles from there, instead of emulating the target under QEMU.
+# For Rust that is the difference between minutes and tens of minutes: rustc is
+# exactly the kind of long-running CPU-bound workload emulation is worst at.
+#
+# This is cheap here only because cha-web's dependency tree is pure Rust — no
+# -sys crates, no `cc`, no build scripts other than cha-web's own (which runs on
+# the host anyway). So cross-compiling needs a linker and nothing else. Verify
+# that assumption still holds before adding a dependency with C in it:
+#
+#     cargo tree -p cha-web -e build | grep -iE '\bcc v|cmake|bindgen'
+#
+# If that ever finds something, this stage needs a full cross C toolchain and
+# CC_<triple>/AR_<triple> wiring, and going back to QEMU may be the better trade.
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
+
+# Set by buildx for each requested platform.
+ARG TARGETARCH
 
 # Never bake a word list into the image, regardless of whether words.txt happens
 # to be in the build context. See cha-web/build.rs for why this is explicit
 # rather than left to depend on which files got COPYed.
 ENV CHA_NO_EMBED_WORDS=1
+
+# Consulted only when the target is arm64; harmless otherwise. Cargo reads this
+# per-target env var to pick the linker.
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+
+# Map Docker's arch name to a Rust target triple, and install the cross linker
+# when one is needed. The triple is stashed in a file so later layers can read it
+# without recomputing the mapping.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; \
+             apt-get update; \
+             apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu; \
+             rm -rf /var/lib/apt/lists/* ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    echo "$triple" > /rust-target; \
+    rustup target add "$triple"
 
 WORKDIR /src
 
@@ -31,6 +67,13 @@ RUN mkdir -p src cha-core/src cha-web/src cha-gui/src-tauri/src \
  && echo 'fn main(){}' > cha-web/src/main.rs \
  && cargo fetch --locked
 
+# Compile the dependency graph against the stubs. cargo builds everything
+# cha-web *declares*, not just what the stub source happens to reference, so this
+# warms the expensive part of the build in a layer that only changes when a
+# manifest or the lockfile does. Source edits below then recompile just cha-core
+# and cha-web.
+RUN cargo build --release --locked -p cha-web --target "$(cat /rust-target)"
+
 # Now the real sources. cha-gui/ui is required because cha-web embeds the front
 # end with include_dir!; cha-gui/src-tauri is NOT built (we only build -p
 # cha-web), but its manifest has to be present for the workspace to resolve.
@@ -38,10 +81,19 @@ COPY cha-core cha-core
 COPY cha-web cha-web
 COPY cha-gui/ui cha-gui/ui
 
-# Bust the stub-source fingerprint so cargo rebuilds against the real code.
-RUN touch cha-core/src/lib.rs cha-web/src/main.rs \
- && cargo build --release --locked -p cha-web \
- && strip target/release/cha-web
+# Bust the stub-source fingerprint so cargo rebuilds against the real code, then
+# park the binary at a fixed path — the target directory is triple-dependent and
+# the runtime stage shouldn't have to know which.
+RUN set -eux; \
+    triple="$(cat /rust-target)"; \
+    touch cha-core/src/lib.rs cha-web/src/main.rs; \
+    cargo build --release --locked -p cha-web --target "$triple"; \
+    mkdir -p /out; \
+    cp "target/$triple/release/cha-web" /out/cha-web; \
+    case "$TARGETARCH" in \
+      arm64) aarch64-linux-gnu-strip /out/cha-web ;; \
+      *)     strip /out/cha-web ;; \
+    esac
 
 # ---- runtime ----------------------------------------------------------------
 # debian-slim rather than a static/scratch image: cha-web needs only libc, but a
@@ -51,7 +103,7 @@ FROM debian:bookworm-slim
 
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin cha
 
-COPY --from=builder /src/target/release/cha-web /usr/local/bin/cha-web
+COPY --from=builder /out/cha-web /usr/local/bin/cha-web
 
 # 0.0.0.0 is correct *inside a container*: the network namespace, not this
 # setting, is what decides whether anything outside can reach the port. Binding

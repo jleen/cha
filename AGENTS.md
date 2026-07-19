@@ -444,6 +444,22 @@ falls back to the raw body — but don't assume every error response is JSON.
   still embeds, so dev stays zero-config.
 - **The Docker build context is the repo root**, not `deploy/`. `cha-web` embeds
   `cha-gui/ui` via `include_dir!`, so the front end must be in context.
+- **The image cross-compiles; it does not emulate.** The builder stage is pinned
+  to `--platform=$BUILDPLATFORM` and targets `TARGETARCH`, so arm64 is built
+  natively on an amd64 runner instead of under QEMU — minutes instead of tens of
+  minutes, since rustc is exactly the workload emulation handles worst. **This is
+  cheap only because cha-web's tree is pure Rust**: no `-sys` crates, no `cc`, no
+  build scripts but cha-web's own. Before adding a dependency with C in it, check
+  `cargo tree -p cha-web -e build | grep -iE '\bcc v|cmake|bindgen'`; if that
+  finds something, the stage needs a full cross C toolchain plus `CC_<triple>` /
+  `AR_<triple>` wiring, and reverting to QEMU may be the better trade. Don't add
+  `setup-qemu-action` back to the workflow — the Dockerfile never asks to be
+  emulated, so it would silently do nothing.
+- **The stub-source layer is a real cache, not decoration.** `cargo build -p
+  cha-web` compiles every dependency cha-web *declares*, not just what the stub
+  source references, so ~87 crates build in a layer that only invalidates when a
+  manifest or the lockfile changes; the real-source layer then rebuilds just
+  cha-core and cha-web. Verified end to end.
 - **`cha-gui/src-tauri/Cargo.toml` is copied into the build but never built.**
   The workspace manifest lists it as a member, so it must exist for the manifest
   to parse; only `-p cha-web` is built. The stub-source dance in the first stage
