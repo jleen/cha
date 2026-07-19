@@ -1,6 +1,6 @@
 [package]
 name = "cha-gui"
-version = "0.5.0"
+version.workspace = true
 edition = "2021"
 
 # Tauri mobile loads the app as a library from the platform shell (a staticlib

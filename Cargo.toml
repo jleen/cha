@@ -1,6 +1,14 @@
 [workspace]
 members = ["cha-core", "cha-gui/src-tauri", "cha-web"]
 
+# The single source of truth for the version. All four crates move in lockstep
+# via `version.workspace = true`, and the Tauri bundle version chains off
+# cha-gui's crate version (tauri.conf.json deliberately has no `version` field),
+# so this line alone sets the CLI, the desktop/mobile app, and the web server.
+# The Apple files under gen/apple are the one exception — see AGENTS.md.
+[workspace.package]
+version = "0.5.0"
+
 # The matcher's hot loop scans ~270k words per query and is unusable when
 # compiled unoptimized — a debug `tauri android dev` / `ios dev` build (both
 # build debug by default) would make the app look broken and slander the
@@ -12,7 +20,7 @@ opt-level = 3
 
 [package]
 name = "cha"
-version = "0.5.0"
+version.workspace = true
 edition = "2021"
 
 [[bin]]

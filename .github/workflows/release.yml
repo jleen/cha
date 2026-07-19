@@ -6,10 +6,35 @@ on:
       - 'v*'
 
 jobs:
+  # The tag is the de facto shipped version: docker/metadata-action derives the
+  # image tags from it, and tauri-action names the GitHub release after it. But
+  # the version *inside* the artifacts comes from [workspace.package] in
+  # Cargo.toml, and nothing otherwise ties the two together — so a mistyped or
+  # forgotten-to-bump tag would publish `cha-web:0.6.0` containing a binary that
+  # reports 0.5.0. Gate both jobs on this so it fails before anything is pushed;
+  # a pushed GHCR tag can't be quietly taken back.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the manifest directly rather than via `cargo metadata`, which would
+      # want a toolchain and a registry index just to answer this.
+      - name: Tag must match the workspace version
+        run: |
+          crate=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$crate" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME implies version $tag, but Cargo.toml declares $crate. Bump [workspace.package] version or retag."
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches the workspace version $crate."
+
   # The cha-web container image. Independent of the Tauri job below — a failure
   # in one shouldn't block the other, since they ship to different places for
   # different audiences.
   docker:
+    needs: verify-version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -58,6 +83,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   release:
+    needs: verify-version
     permissions:
       contents: write
     strategy:

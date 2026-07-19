@@ -49,6 +49,38 @@ is a hard `build.rs` panic, not a graceful notice — mobile has no `dictionarie
 folder to fall back to, so a dictionary-less mobile app can't be recovered by
 the user and must not build. See the mobile section.
 
+## Versioning: one number, in `[workspace.package]`
+
+**To bump the version, edit `version` under `[workspace.package]` in the root
+`Cargo.toml`. That is the only place.** All four crates inherit it with
+`version.workspace = true`, and everything downstream chains off that:
+
+- **The Tauri bundle version** — `tauri.conf.json` deliberately has **no**
+  `version` field. Tauri falls back to `CARGO_PKG_VERSION` from
+  `cha-gui/src-tauri/Cargo.toml` (see `tauri-codegen`'s `context.rs`). Don't
+  "helpfully" add the field back; that reintroduces a second source of truth.
+  Tauri's own docs recommend the opposite direction, which is right for a
+  single-crate app and wrong for this four-crate workspace.
+- **Android's `versionName`/`versionCode`** — derived from the crate version
+  into the git-ignored `gen/android/app/tauri.properties`, regenerated per build.
+- **The container image tag and the GitHub release name** — derived from the git
+  tag, *not* from the source. The `verify-version` job in `release.yml` gates
+  both release jobs on the tag matching this version, so a `v0.6.0` tag on a
+  0.5.0 tree fails before anything reaches GHCR.
+
+**The one exception is iOS.** `gen/apple/project.yml` carries literal
+`CFBundleShortVersionString`/`CFBundleVersion` strings, and
+`gen/apple/cha-gui_iOS/Info.plist` is generated *from* them by XcodeGen — but
+nothing in CI runs XcodeGen, and `tauri ios init` would clobber the hand edits in
+`project.yml` (the `PATH` preBuildScript, `ARCHS`, `LIBRARY_SEARCH_PATHS`). So
+those four strings must be updated **by hand** alongside the workspace version.
+Until iOS is actually distributed this is a cosmetic drift; before the first
+TestFlight upload, either add a CI check that asserts they match or fold the
+version into an `.xcconfig`. One accepted cost of dropping `version` from
+`tauri.conf.json`: a macOS `tauri dev` run's embedded `Info.plist` no longer gets
+`CFBundleShortVersionString` (that codegen branch is gated on the field being
+present, and on `dev` — release bundles are unaffected).
+
 ## Performance requirements
 
 `cha` searches ~270k words per query, and has ambitions to search
@@ -702,7 +734,9 @@ IPA-export step (`Couldn't load -exportOptionsPlist … no such file`).
 `org.saturnvalley.cha` in App Store Connect; set your real Team in the Xcode
 project; **bump the version** (App Store Connect rejects a duplicate
 `CFBundleVersion`, and Tauri derives it from the crate version, so bump the patch
-in the root `Cargo.toml`); archive & upload via the Xcode Organizer (Product →
+under `[workspace.package]` in the root `Cargo.toml` — and, for iOS specifically,
+the hand-maintained strings in `gen/apple/`; see "Versioning" above); archive &
+upload via the Xcode Organizer (Product →
 Archive → Distribute → TestFlight) or `cargo tauri ios build --export-method
 app-store-connect` + the Transporter app. Add the tester in TestFlight (internal
 = instant; external = one-time Beta App Review). `gen/apple/ExportOptions.plist`
