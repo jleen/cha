@@ -25,7 +25,11 @@
 # CC_<triple>/AR_<triple> wiring, and going back to QEMU may be the better trade.
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
-# Set by buildx for each requested platform.
+# Both set by buildx. BUILDARCH is the machine doing the building, TARGETARCH the
+# image being produced; they differ only when actually cross-compiling. CI builds
+# arm64 on an amd64 runner, but an Apple Silicon laptop is the mirror image, so
+# neither may be assumed.
+ARG BUILDARCH
 ARG TARGETARCH
 
 # Never bake a word list into the image, regardless of whether words.txt happens
@@ -33,23 +37,34 @@ ARG TARGETARCH
 # rather than left to depend on which files got COPYed.
 ENV CHA_NO_EMBED_WORDS=1
 
-# Consulted only when the target is arm64; harmless otherwise. Cargo reads this
-# per-target env var to pick the linker.
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-
-# Map Docker's arch name to a Rust target triple, and install the cross linker
-# when one is needed. The triple is stashed in a file so later layers can read it
-# without recomputing the mapping.
+# Resolve the Rust target triple and the toolchain to link and strip with, then
+# stash both for later layers. Installing a cross compiler only when the arches
+# actually differ keeps a same-arch build from pulling a toolchain it would never
+# invoke.
+#
+# Note Debian's package name is not simply the binary prefix: the amd64 cross
+# compiler is `gcc-x86-64-linux-gnu` (hyphens) while its binaries are
+# `x86_64-linux-gnu-*` (underscore). Hence separate pkg and prefix.
 RUN set -eux; \
     case "$TARGETARCH" in \
-      amd64) triple=x86_64-unknown-linux-gnu ;; \
-      arm64) triple=aarch64-unknown-linux-gnu; \
-             apt-get update; \
-             apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu; \
-             rm -rf /var/lib/apt/lists/* ;; \
+      amd64) triple=x86_64-unknown-linux-gnu;  prefix=x86_64-linux-gnu;  pkg=gcc-x86-64-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; prefix=aarch64-linux-gnu; pkg=gcc-aarch64-linux-gnu ;; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
+    if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends "$pkg"; \
+      rm -rf /var/lib/apt/lists/*; \
+      linker="$prefix-gcc"; strip_bin="$prefix-strip"; \
+    else \
+      linker=cc; strip_bin=strip; \
+    fi; \
     echo "$triple" > /rust-target; \
+    echo "$strip_bin" > /strip-bin; \
+    # A cargo config entry rather than CARGO_TARGET_<TRIPLE>_LINKER, because the
+    # triple isn't known until this RUN executes and ENV can't be computed.
+    mkdir -p "$CARGO_HOME"; \
+    printf '[target.%s]\nlinker = "%s"\n' "$triple" "$linker" >> "$CARGO_HOME/config.toml"; \
     rustup target add "$triple"
 
 WORKDIR /src
@@ -90,10 +105,7 @@ RUN set -eux; \
     cargo build --release --locked -p cha-web --target "$triple"; \
     mkdir -p /out; \
     cp "target/$triple/release/cha-web" /out/cha-web; \
-    case "$TARGETARCH" in \
-      arm64) aarch64-linux-gnu-strip /out/cha-web ;; \
-      *)     strip /out/cha-web ;; \
-    esac
+    "$(cat /strip-bin)" /out/cha-web
 
 # ---- runtime ----------------------------------------------------------------
 # debian-slim rather than a static/scratch image: cha-web needs only libc, but a
