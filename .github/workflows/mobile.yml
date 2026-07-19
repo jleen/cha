@@ -1,0 +1,145 @@
+name: Mobile
+
+# Separate from release.yml (desktop). Manual runs build-check both platforms and
+# upload artifacts; a `mobile-v*` tag additionally attaches the signed Android
+# APK + AAB to a GitHub release. iOS is a Simulator build-check only for now — no
+# signing, no secrets, no distribution (TestFlight is a later add).
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'mobile-v*'
+
+env:
+  # Keep in sync with the NDK used locally / documented in AGENTS.md.
+  NDK_VERSION: '26.1.10909125'
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # for softprops/action-gh-release on tag runs
+    steps:
+      - uses: actions/checkout@v4
+
+      # words.txt is git-ignored and build.rs hard-errors without it. With no
+      # WORDS_URL secret set, CI uses the committed stub (build-check, NOT a
+      # shippable dictionary). Host the real list and add a WORDS_URL secret to
+      # turn tagged builds into real releases — no workflow edit needed.
+      - name: Materialize words.txt
+        env:
+          WORDS_URL: ${{ secrets.WORDS_URL }}
+        run: |
+          if [ -n "$WORDS_URL" ]; then
+            curl -fSL "$WORDS_URL" -o words.txt
+            echo "Using production word list from WORDS_URL ($(wc -l < words.txt) lines)."
+          else
+            cp ci/words-stub.txt words.txt
+            echo "::warning::Using ci/words-stub.txt placeholder dictionary. Set the WORDS_URL secret to ship the real word list."
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install Tauri CLI
+        run: cargo binstall -y 'tauri-cli@^2'
+
+      # Decode the keystore and write gen/android/keystore.properties (the exact
+      # file build.gradle.kts reads). Tauri uses a single `password` for store+key.
+      - name: Configure signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set — the release build would be unsigned and fail to install."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/cha-upload.jks"
+          cat > cha-gui/src-tauri/gen/android/keystore.properties <<EOF
+          password=${ANDROID_KEY_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          storeFile=${RUNNER_TEMP}/cha-upload.jks
+          EOF
+
+      - name: Build signed APK + AAB
+        run: cargo tauri android build --apk --aab
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp cha-gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk dist/
+          cp cha-gui/src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab dist/
+
+      - name: Upload artifacts (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: dist/*
+
+      - name: Attach to release (tag runs)
+        if: startsWith(github.ref, 'refs/tags/mobile-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Cha Mobile ${{ github.ref_name }}
+          files: dist/*
+          draft: true
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Materialize words.txt
+        env:
+          WORDS_URL: ${{ secrets.WORDS_URL }}
+        run: |
+          if [ -n "$WORDS_URL" ]; then
+            curl -fSL "$WORDS_URL" -o words.txt
+          else
+            cp ci/words-stub.txt words.txt
+            echo "::warning::Using ci/words-stub.txt placeholder dictionary."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install Tauri CLI
+        run: cargo binstall -y 'tauri-cli@^2'
+
+      # Build-check only: Simulator target needs no signing and skips IPA export
+      # (also sidesteps the known `ios build`/`run` export-plist bug).
+      - name: Build for the Simulator (build-check, unsigned)
+        run: cargo tauri ios build --target aarch64-sim --no-sign
+
+      - name: Upload Simulator .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-sim-app
+          path: cha-gui/src-tauri/gen/apple/build/arm64-sim/Cha.app
