@@ -1,0 +1,30 @@
+[package]
+name = "cha-web"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cha-web"
+path = "src/main.rs"
+
+[dependencies]
+# `serde` because the search wire types cross the HTTP boundary. This is the
+# same feature the Tauri app enables — the two front ends share one definition.
+cha-core = { path = "../cha-core", features = ["serde"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower-http = { version = "0.6", features = ["set-header", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+# `include_dir`, not `rust-embed`: rust-embed reads from disk in debug builds
+# unless `debug-embed` is on, so a debug-built server deployed somewhere would
+# silently 404 every asset. include_dir is always a compile-time embed — one
+# behavior, no surprise.
+include_dir = "0.7"
+mime_guess = "2"
+
+# NOTE: the workspace root sets `[profile.dev.package.cha-core] opt-level = 3`,
+# which this crate inherits. Don't re-add it here.

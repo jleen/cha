@@ -1,5 +1,5 @@
 [workspace]
-members = ["cha-core", "cha-gui/src-tauri"]
+members = ["cha-core", "cha-gui/src-tauri", "cha-web"]
 
 # The matcher's hot loop scans ~270k words per query and is unusable when
 # compiled unoptimized — a debug `tauri android dev` / `ios dev` build (both

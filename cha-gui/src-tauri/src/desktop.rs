@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cha_core::dictionary::WordListBuilder;
+use cha_core::dictionary::{self, WordListBuilder};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -75,7 +75,9 @@ pub fn add_user_lists(app: &tauri::AppHandle, builder: &mut WordListBuilder) -> 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("Cha: could not create {}: {e}", dir.display());
     } else {
-        load_dir_files(&dir, builder);
+        // The walk itself (sort order, hidden-file skip, per-file naming) lives
+        // in cha-core so the web server's --dict-dir behaves identically.
+        dictionary::load_dir(&dir, builder);
     }
     Some(dir)
 }
@@ -94,50 +96,6 @@ pub fn no_words_message(dir: Option<&Path>) -> String {
                  be located on this system."
             .to_string(),
     }
-}
-
-/// Concatenate every regular, non-hidden file in `dir` into `builder`, in sorted
-/// filename order for determinism. Subdirectories and hidden files (e.g. macOS
-/// `.DS_Store`, whose binary contents would inject junk "words") are skipped, as
-/// are individually unreadable files — a bad file shouldn't sink the whole load.
-fn load_dir_files(dir: &Path, builder: &mut WordListBuilder) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            eprintln!("Cha: could not read {}: {e}", dir.display());
-            return;
-        }
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && !is_hidden(p))
-        .collect();
-    paths.sort();
-    for path in &paths {
-        builder.begin_source(list_name(path));
-        if let Err(e) = builder.add_file(path) {
-            eprintln!("Cha: could not read {}: {e}", path.display());
-        }
-    }
-}
-
-/// A friendly display name for a dictionary file: its file name with the
-/// extension stripped (`scrabble.txt` -> `scrabble`). Falls back to the full
-/// file name, then to the whole path, if the stem can't be extracted.
-fn list_name(path: &Path) -> String {
-    path.file_stem()
-        .or_else(|| path.file_name())
-        .and_then(|n| n.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-/// Whether a path's file name begins with a dot (a dotfile on Unix; also filters
-/// macOS metadata files like `.DS_Store` regardless of platform).
-fn is_hidden(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with('.'))
 }
 
 /// Monotonic counter for minting unique labels for additional search windows.

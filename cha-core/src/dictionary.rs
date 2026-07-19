@@ -20,6 +20,63 @@ pub struct NamedWordList {
     pub words: Vec<String>,
 }
 
+/// Append every regular, non-hidden file in `dir` to `builder`, each as its own
+/// named source, in sorted filename order for determinism.
+///
+/// Shared by the desktop app (which reads the user's config-dir `dictionaries/`
+/// folder) and the web server (`--dict-dir`), so the policy below is decided
+/// once rather than forked per backend:
+///
+/// - **Hidden files are skipped.** macOS drops a binary `.DS_Store` into any
+///   folder a user opens in Finder; reading it would inject its contents as
+///   "words".
+/// - **Subdirectories are skipped** rather than walked — a flat folder keeps the
+///   list names predictable.
+/// - **An unreadable file is warned about and skipped**, not fatal. One bad file
+///   shouldn't cost the user every other list.
+///
+/// Errors go to stderr rather than being returned: every caller's policy is to
+/// continue, and a server logs them while a desktop app has nowhere to show them.
+pub fn load_dir(dir: &Path, builder: &mut WordListBuilder) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Cha: could not read {}: {e}", dir.display());
+            return;
+        }
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && !is_hidden(p))
+        .collect();
+    paths.sort();
+    for path in &paths {
+        builder.begin_source(list_name(path));
+        if let Err(e) = builder.add_file(path) {
+            eprintln!("Cha: could not read {}: {e}", path.display());
+        }
+    }
+}
+
+/// A friendly display name for a dictionary file: its file name with the
+/// extension stripped (`scrabble.txt` -> `scrabble`). Falls back to the full
+/// file name, then to the whole path, if the stem can't be extracted.
+fn list_name(path: &Path) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Whether a path's file name begins with a dot (a dotfile on Unix; also filters
+/// macOS metadata files like `.DS_Store` regardless of platform).
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'))
+}
+
 /// Accumulates a word list from one or more sources (in-memory strings and/or
 /// files), trimming, lowercasing, and deduplicating *across* all of them while
 /// preserving first-seen order. The GUI uses this to merge the embedded list

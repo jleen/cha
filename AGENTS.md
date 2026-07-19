@@ -14,9 +14,15 @@ cargo test
 dedicated to keeping it warning-free (e.g. prefer the `?` operator over an
 `if x.is_none() { return None }`). `cargo fmt` likewise: the repo is kept
 fully rustfmt-formatted, so run it before committing rather than hand-aligning.
-The workspace has two members (`cha-core`, `cha-gui/src-tauri`) plus the CLI
-crate (`cha`) at the root; `--workspace` covers the libraries — build the GUI
-explicitly with `cargo build -p cha-gui` when touching it. The GUI now has a
+The workspace has three members (`cha-core`, `cha-gui/src-tauri`, `cha-web`) plus
+the CLI crate (`cha`) at the root; `--workspace` covers the libraries — build the
+GUI explicitly with `cargo build -p cha-gui` when touching it. `--workspace` now
+also pulls `cha-web`'s axum/tokio tree, which makes the pre-commit loop slower;
+that's expected.
+
+**Keep the mobile cross-compiles `-p cha-gui`.** They resolve only that crate's
+graph, so `cha-web` is never built for a phone. Generalizing them to
+`--workspace --target aarch64-apple-ios` would try to build axum for iOS. The GUI now has a
 `[lib]` with three `crate-type`s, so a plain `cargo build -p cha-gui` also links
 a staticlib and a cdylib of the whole Tauri stack; add `--bins` when you only
 want the desktop exe.
@@ -355,6 +361,82 @@ and the [`capabilities/`](cha-gui/src-tauri/capabilities/) files:
   `get_webview_window("pattern-syntax")` + `set_focus()` instead of stacking
   duplicates. `AppHandle::clone()` is cheap (an `Arc` bump) — clone freely to move
   a handle into a `'static` closure.
+
+## Web (`cha-web`, axum)
+
+`cha-web` serves the same engine and the same front end over HTTP, as a single
+binary. Run it with `cargo run -p cha-web`; `--dict-dir DIR` adds server-side
+word lists, `--ui-dir cha-gui/ui` serves the front end from disk so you can edit
+and reload without a rebuild.
+
+- **The front end is `cha-gui/ui/` verbatim, embedded — not copied.** `include_dir!`
+  pulls it straight out of the GUI crate at compile time. There is exactly one
+  copy of the UI in the repo; if you find yourself duplicating a file, stop.
+  Deliberately **not** `rust-embed`, which reads from disk in debug builds unless
+  `debug-embed` is set — a debug-built server deployed anywhere would silently
+  404 every asset. `build.rs` lists each UI file in `rerun-if-changed`, because
+  emitting any such line makes the list exhaustive; **add a line there when you
+  add a UI file**, or edits to it won't trigger a rebuild.
+- **`spawn_blocking` around the scan is mandatory.** It's CPU-bound for
+  milliseconds to seconds, and on an async worker it stalls every other
+  connection sharing that thread. This is the same rule as
+  `#[tauri::command(async)]` in the GUI, one layer down, with worse symptoms.
+  Verified by loading the box with 12 concurrent 2M-word searches and confirming
+  static assets still served in 0.2–2.9 ms.
+- **A dictionary-less server exits at startup**, unlike the desktop app, which
+  degrades to a notice with an "Open Dictionary Folder" button. A user sitting at
+  a desktop can fix it; a server operator is elsewhere and wants to know at
+  deploy time. `dict_status` therefore always returns `null` on web.
+- **`--bind` defaults to `127.0.0.1`.** Exposing the server should be a
+  deliberate act, not the result of a forgotten flag.
+- **`max_results` is 500 on web, vs 5000 in the app.** The binding cost inverts:
+  the app's cap protects the DOM, the server's protects the wire (5000 rows is
+  ~250 KB of JSON). `total` is still counted truthfully, so "showing first N of
+  M" stays honest.
+
+### The threat model is private/LAN, and that's a decision — not an oversight
+
+The guards below exist because a *typo* can wedge the process; they are not an
+adversary story. There is deliberately **no rate limiting, no authentication, and
+no TLS**. Putting this on the public internet needs a reverse proxy and a fresh
+look at every number here.
+
+| Guard | Value | Where |
+|---|---|---|
+| Body size | 8 KB | `DefaultBodyLimit` on the `/api` router |
+| Pattern length | 64 | `CompileLimits`, via `web_limits()` |
+| Anagram combos | 4096 | `CompileLimits` — see the `CompileLimits` section |
+| Regex backtracking | 10_000 | `CompileLimits` |
+| Fuzzy steps | 10_000 | `CompileLimits` |
+| Scan deadline | 2 s | `SearchLimits::deadline`, per 4096-word chunk |
+| Concurrency | CPU count | `Semaphore::try_acquire_owned` → 503 |
+| CSP | `'self'` | `SetResponseHeaderLayer` |
+
+Two of those choices are easy to get wrong:
+
+- **`try_acquire_owned`, not a queue.** `tower`'s `ConcurrencyLimitLayer` queues,
+  and an unbounded queue under overload just converts it into unbounded latency
+  and memory. A fast 503 lets a client back off. The permit is moved *into* the
+  blocking task so it covers the whole scan.
+- **The semaphore is on the search handler only**, so `/api/platform` and asset
+  serving stay responsive while the CPU is saturated.
+
+`tauri.conf.json` sets `"csp": null`, which is fine for a local webview and not
+for an HTTP origin. The front end has no inline scripts or styles, so `'self'`
+fits with no source changes — keep it that way.
+
+Note axum's own extractors (body limit, JSON parse) reject with **plain text**,
+not the `{"error": ...}` envelope `ApiError` produces. That's fine — `transport.js`
+falls back to the raw body — but don't assume every error response is JSON.
+
+### Adding a command
+
+A command must be added in **both** backends or the front end breaks on one
+transport: `generate_handler!` in [`lib.rs`](cha-gui/src-tauri/src/lib.rs) and a
+`post()` route in [`main.rs`](cha-web/src/main.rs). Argument names must match
+what `main.js` passes. Beware that Tauri camelCases snake_case argument names on
+the JS side, so a two-word argument needs `#[serde(rename)]` on the web struct to
+keep the two transports speaking one protocol. No current argument has two words.
 
 ## Mobile (iOS + Android, Tauri v2)
 
