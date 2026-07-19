@@ -122,24 +122,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios-sim
+          targets: aarch64-apple-ios
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install Tauri CLI
-        run: cargo binstall -y 'tauri-cli@^2'
-
-      # Build-check only: Simulator target needs no signing and skips IPA export
-      # (also sidesteps the known `ios build`/`run` export-plist bug).
-      - name: Build for the Simulator (build-check, unsigned)
-        run: cargo tauri ios build --target aarch64-sim --no-sign
-
-      - name: Upload Simulator .app
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-sim-app
-          path: cha-gui/src-tauri/gen/apple/build/arm64-sim/Cha.app
+      # Build-check only: cross-compile the shared library for iOS (the device
+      # target — arch-agnostic, so it works whichever arch the runner is). This
+      # catches the breakage that matters, the shared Rust code compiling and
+      # linking for iOS, without an Xcode *archive* (which insists on a signing
+      # team CI doesn't have — the repo-root Signing.local.xcconfig is git-ignored)
+      # and without any Apple secrets. Building the full signed .app/IPA is the
+      # deferred TestFlight work. Runs on macOS because the iOS SDK is Xcode-only.
+      - name: Build-check (cross-compile lib for iOS)
+        run: cargo build -p cha-gui --lib --target aarch64-apple-ios
