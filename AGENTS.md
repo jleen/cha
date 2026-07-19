@@ -54,8 +54,11 @@ instantaneous on a modern laptop. Current release-build baselines:
 | Template (e.g. `qu...`) | < 10 ms | ~5 ms |
 | Anagram (e.g. `;..oting`) | < 20 ms | ~8 ms |
 
-The benchmark flag (`cha <pattern> <wordlist> <N>`) is the primary way to
-measure regressions. Run with N=1000 to get stable averages.
+The benchmark flags (`cha <pattern> -w <wordlist> -b <N>`) are the primary way to
+measure regressions. Run with `-b 1000` to get stable averages, e.g.
+`cha ';..oting' -w words.txt -b 1000`. Always compare against a baseline you
+measured on the *same machine* (`git stash`, build, measure, `git stash pop`) —
+the absolute numbers in the table above are hardware-specific and now read low.
 
 These are laptop **release** numbers. A phone CPU runs the hot loop maybe 2–3×
 slower, still comfortably interactive behind the 100 ms debounce. **Debug builds
@@ -97,6 +100,42 @@ wordlist. Allocation only happens when stripping is actually needed.
 the per-word hot path must stay panic- and `Result`-free. The CLI handles the
 `Err` (interactive mode re-prompts instead of crashing); the GUI maps it to a
 string shown in the UI.
+
+## Every backtracking path needs a bound (`CompileLimits`)
+
+Pattern input is untrusted — even from a local user, a plausible-looking pattern
+could hang or OOM the app. There are **three** superlinear paths in `pattern.rs`,
+all now bounded by `CompileLimits`, whose `Default` is generous enough that no
+hand-typed pattern reaches it. `compile_pattern`/`compile_pattern_checked` use
+the defaults; `compile_pattern_with`/`compile_pattern_checked_with` take explicit
+limits, which is how a server passes tighter ones.
+
+- **`max_anagram_combos` — the dangerous one, and the only one that binds at
+  *compile* time.** `compile_anagram` calls `cartesian_product`, which
+  materializes the full product of every `[...]` group *before any word is
+  scanned*, and `combo_pools` then expands each combo into 216 bytes. Growth is
+  multiplicative in the group count: `;[abcde]`×8 is 390_625 combos (~84 MB,
+  ~28 s) and ×10 is ~9.7M (~2.1 GB). Because it happens during compile, a
+  per-word deadline or a scan timeout **cannot** catch it — the check must stay
+  where it is, before the product is built. Use `checked_mul`: the product
+  overflows `usize` at around 28 five-way groups, and a wrapped value would slip
+  under the cap.
+- **`backtrack_limit`** bounds `fancy-regex` on the non-fuzzy template path,
+  where `template_to_regex` turns every `*` into `[a-z]*`.
+- **`max_fuzzy_steps`** bounds `fuzzy_match`, the hand-rolled backtracker on the
+  fuzzy path. Note its existing `budget` parameter is the *fuzz allowance*, a
+  different quantity — don't overload it. The doc comment there reasons correctly
+  about recursion *depth*, but depth was never the exposure; the `Star` arm
+  branches twice per node, and nothing bounded the node count.
+
+Exceeding a *match-time* limit degrades to "no match" (via the existing
+`unwrap_or(false)` and the `steps == 0` early return), which is what keeps the
+hot path `Result`-free — see the section above. Exceeding the *compile-time*
+limit is a normal `PatternError`.
+
+When adding a limit, test both halves: rejected under tight limits **and**
+behaviorally unchanged under the defaults, so a limiter can't silently narrow the
+pattern language.
 
 ## Matches carry optional detail (`MatchInfo`)
 
@@ -573,6 +612,10 @@ signed Android APK + AAB to a (draft) GitHub release.
   only `count_str(word)` belongs inside the closure.
 - Do not replace `[usize; 26]` with `HashMap` in the character-counting code.
   The HashMap version was ~6× slower on anagram queries.
+- Do not add a backtracking or combinatorial path to `pattern.rs` without a
+  ceiling in `CompileLimits`, and do not call `cartesian_product` without
+  checking the product size first. See the `CompileLimits` section — every such
+  path is reachable from untrusted input by a short pattern.
 - `fancy_regex` is required (not the plain `regex` crate) because digit
   variables (`1234321`) compile to named capture groups with backreferences,
   which a pure DFA cannot handle.

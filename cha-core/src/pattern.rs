@@ -1,4 +1,4 @@
-use fancy_regex::Regex;
+use fancy_regex::RegexBuilder;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -49,9 +49,75 @@ pub struct Compiled {
 /// Shown for a contentless pattern. Displayed gently by callers, never as an error.
 const CONTENTLESS_NOTE: &str = "Pattern has no letters to match";
 
+/// Ceilings on how much work a *single* pattern is allowed to cost.
+///
+/// Every backtracking or combinatorial path in this module needs a bound, because
+/// each one is driven directly by untrusted input and each can be made
+/// superlinear by a short, innocent-looking pattern. Three exist:
+///
+/// - `max_anagram_combos` bounds `cartesian_product` in `compile_anagram`, which
+///   materializes the full product of every `[...]` group **before** any word is
+///   scanned. `;[abcde]` repeated 8 times is 5^8 = 390_625 combos ≈ 84 MB of
+///   `combo_pools`; ten groups is ~2.1 GB. This is the only limit that binds at
+///   compile time, so it's the only one that can exhaust memory rather than time.
+/// - `backtrack_limit` bounds the `fancy-regex` engine on the non-fuzzy template
+///   path, where `template_to_regex` turns every `*` into `[a-z]*`.
+/// - `max_fuzzy_steps` bounds `fuzzy_match`, the hand-rolled backtracker used on
+///   the fuzzy path, whose `Star` arm branches like a regex star with no engine
+///   underneath it to impose a limit of its own.
+///
+/// `Default` is generous — enough that no plausible hand-typed pattern reaches it
+/// — and exists to turn a hang or an OOM into an error message. A server exposing
+/// this to a network wants much tighter values; see `cha-web`.
+#[derive(Debug, Clone)]
+pub struct CompileLimits {
+    /// Maximum length, in bytes, of the whole pattern string.
+    pub max_pattern_len: usize,
+    /// Maximum number of `[...]` combinations an anagram may expand to.
+    pub max_anagram_combos: usize,
+    /// Maximum regex backtracking steps per word (`fancy-regex`'s own unit).
+    pub backtrack_limit: usize,
+    /// Maximum `fuzzy_match` recursion steps per word.
+    pub max_fuzzy_steps: u32,
+}
+
+impl Default for CompileLimits {
+    fn default() -> Self {
+        Self {
+            // Interactive use: a pattern this long is a paste accident, not a query.
+            max_pattern_len: 1024,
+            // ~21 MB of `combo_pools`. Real patterns use a handful of groups.
+            max_anagram_combos: 100_000,
+            // fancy-regex's own default; preserves existing behavior exactly.
+            backtrack_limit: 1_000_000,
+            // Comparable ceiling for the hand-rolled matcher, which previously
+            // had none at all.
+            max_fuzzy_steps: 1_000_000,
+        }
+    }
+}
+
 /// Compile a pattern, distinguishing a contentless pattern (well-formed but with
 /// nothing to match — carried as a note) from a genuine syntax error (`Err`).
+///
+/// Uses `CompileLimits::default()`. Callers that accept patterns from a network
+/// should use [`compile_pattern_checked_with`] and supply tighter ceilings.
 pub fn compile_pattern_checked(pattern_str: &str) -> Result<Compiled, PatternError> {
+    compile_pattern_checked_with(pattern_str, &CompileLimits::default())
+}
+
+/// [`compile_pattern_checked`] with explicit work ceilings. See [`CompileLimits`].
+pub fn compile_pattern_checked_with(
+    pattern_str: &str,
+    limits: &CompileLimits,
+) -> Result<Compiled, PatternError> {
+    if pattern_str.len() > limits.max_pattern_len {
+        return Err(PatternError(format!(
+            "Pattern is too long ({} characters; the limit is {})",
+            pattern_str.len(),
+            limits.max_pattern_len
+        )));
+    }
     let parts: Vec<&str> = pattern_str.split('&').collect();
     let mut matchers: Vec<(bool, Matcher)> = Vec::new();
     let mut contentless = false;
@@ -66,7 +132,7 @@ pub fn compile_pattern_checked(pattern_str: &str) -> Result<Compiled, PatternErr
         // Compile every part regardless, so a real syntax error in any part
         // (e.g. `;&ca$t`) still surfaces as a hard `Err` and takes precedence
         // over the contentless note.
-        let (matcher, part_contentless) = compile_one_pattern(actual)?;
+        let (matcher, part_contentless) = compile_one_pattern(actual, limits)?;
         contentless |= part_contentless;
         matchers.push((negate, matcher));
     }
@@ -115,27 +181,38 @@ pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
     compile_pattern_checked(pattern_str).map(|c| c.matcher)
 }
 
+/// [`compile_pattern`] with explicit work ceilings. See [`CompileLimits`].
+pub fn compile_pattern_with(
+    pattern_str: &str,
+    limits: &CompileLimits,
+) -> Result<Matcher, PatternError> {
+    compile_pattern_checked_with(pattern_str, limits).map(|c| c.matcher)
+}
+
 /// Compile one `&`-separated part, returning its matcher and whether it is
 /// *contentless* — well-formed but with no letters or wildcard structure to match
 /// (an empty template, or a bare `;` empty-pool anagram). Wildcards (`. * @ #`),
 /// classes `[…]`, and sub-patterns `(…)` count as content, so only genuinely empty
 /// parts are flagged.
-fn compile_one_pattern(pattern: &str) -> Result<(Matcher, bool), PatternError> {
+fn compile_one_pattern(
+    pattern: &str,
+    limits: &CompileLimits,
+) -> Result<(Matcher, bool), PatternError> {
     if let Some(idx) = pattern.find(';') {
         if idx == 0 {
             // Pure anagram: contentless when the pool has no matchable tokens.
             let contentless = anagram_pool_is_empty(&pattern[1..]);
-            Ok((compile_anagram(None, &pattern[1..])?, contentless))
+            Ok((compile_anagram(None, &pattern[1..], limits)?, contentless))
         } else {
             Ok((
-                compile_anagram(Some(&pattern[..idx]), &pattern[idx + 1..])?,
+                compile_anagram(Some(&pattern[..idx]), &pattern[idx + 1..], limits)?,
                 false,
             ))
         }
     } else {
         // Template: contentless when it is empty after stripping any fuzz suffix.
         let contentless = split_fuzz(pattern)?.0.is_empty();
-        Ok((compile_template(pattern)?, contentless))
+        Ok((compile_template(pattern, limits)?, contentless))
     }
 }
 
@@ -180,18 +257,26 @@ fn split_fuzz(template: &str) -> Result<(&str, Option<usize>), PatternError> {
 // So when there’s fuzz, we use our own naïve matching implementation, which is
 // inefficient on * wildcards but is efficient on fuzzy matches (just keeping a running
 // tally and doing backtracking).
-fn compile_template(template: &str) -> Result<Matcher, PatternError> {
+fn compile_template(template: &str, limits: &CompileLimits) -> Result<Matcher, PatternError> {
     let (base, fuzz) = split_fuzz(template)?;
     // `N > 0` enables fuzzy matching; `` `0 `` is exact, so it falls through to the
     // regular regex path — which is also the path every fuzz-free template takes,
     // unchanged, so existing patterns are never rerouted.
     if let Some(k) = fuzz {
         if k > 0 {
-            return compile_fuzzy_template(base, k);
+            return compile_fuzzy_template(base, k, limits);
         }
     }
     let regex_str = template_to_regex(base)?;
-    let re = Regex::new(&format!("(?i)^{}$", regex_str))
+    // `template_to_regex` maps every `*` to `[a-z]*`, so a star-heavy template
+    // like `**********cat` costs the engine work superlinear in the star count,
+    // *per word*, across the whole list. Cap the backtracking rather than let a
+    // short pattern wedge the app; the `unwrap_or(false)` below degrades a word
+    // that exceeds the cap to "no match", which keeps the hot path free of
+    // `Result` handling (see the module's performance notes).
+    let re = RegexBuilder::new(&format!("(?i)^{}$", regex_str))
+        .backtrack_limit(limits.backtrack_limit)
+        .build()
         .map_err(|e| PatternError(format!("Invalid template '{}': {}", base, e)))?;
     Ok(Box::new(move |word: &str| {
         if re.is_match(word).unwrap_or(false) {
@@ -289,19 +374,37 @@ fn tokenize_fuzzy(template: &str) -> Result<Vec<FuzzTok>, PatternError> {
 /// tail-call optimization: every call increases `ti + ci` by at least one, so the
 /// recursion depth is bounded by `toks.len() + w.len()` — a few dozen frames for any
 /// real word, nowhere near a stack concern.
-fn fuzzy_match(toks: &[FuzzTok], w: &[u8], ti: usize, ci: usize, budget: usize) -> bool {
+fn fuzzy_match(
+    toks: &[FuzzTok],
+    w: &[u8],
+    ti: usize,
+    ci: usize,
+    budget: usize,
+    steps: &mut u32,
+) -> bool {
+    // `steps` bounds the *number of nodes explored*, which is a different
+    // quantity from `budget` (the fuzz allowance) and from the recursion depth
+    // reasoned about above. Depth is naturally bounded; branching is not — the
+    // `Star` arm below recurses twice, so a star-heavy template is exponential
+    // with nothing underneath it to stop, unlike the regex path which at least
+    // has fancy-regex's own limiter. Exhausting the budget reports "no match",
+    // matching how the regex path degrades when it hits `backtrack_limit`.
+    if *steps == 0 {
+        return false;
+    }
+    *steps -= 1;
     if ti == toks.len() {
         return ci == w.len();
     }
     match &toks[ti] {
         FuzzTok::Star => {
             // Match zero letters here, or consume one letter and stay on the star.
-            if fuzzy_match(toks, w, ti + 1, ci, budget) {
+            if fuzzy_match(toks, w, ti + 1, ci, budget, steps) {
                 return true;
             }
             ci < w.len()
                 && w[ci].to_ascii_lowercase().is_ascii_lowercase()
-                && fuzzy_match(toks, w, ti, ci + 1, budget)
+                && fuzzy_match(toks, w, ti, ci + 1, budget, steps)
         }
         tok => {
             if ci >= w.len() {
@@ -315,7 +418,7 @@ fn fuzzy_match(toks: &[FuzzTok], w: &[u8], ti: usize, ci: usize, budget: usize) 
                         // only onto a letter (mirroring the wildcard a freed slot becomes).
                         return budget > 0
                             && c.is_ascii_lowercase()
-                            && fuzzy_match(toks, w, ti + 1, ci + 1, budget - 1);
+                            && fuzzy_match(toks, w, ti + 1, ci + 1, budget - 1, steps);
                     }
                     true
                 }
@@ -326,15 +429,23 @@ fn fuzzy_match(toks: &[FuzzTok], w: &[u8], ti: usize, ci: usize, budget: usize) 
                 FuzzTok::Class(set) => set.contains(&c),
                 FuzzTok::Star => unreachable!(),
             };
-            satisfied && fuzzy_match(toks, w, ti + 1, ci + 1, budget)
+            satisfied && fuzzy_match(toks, w, ti + 1, ci + 1, budget, steps)
         }
     }
 }
 
-fn compile_fuzzy_template(template: &str, fuzz: usize) -> Result<Matcher, PatternError> {
+fn compile_fuzzy_template(
+    template: &str,
+    fuzz: usize,
+    limits: &CompileLimits,
+) -> Result<Matcher, PatternError> {
     let toks = tokenize_fuzzy(template)?;
+    let max_steps = limits.max_fuzzy_steps;
     Ok(Box::new(move |word: &str| {
-        if fuzzy_match(&toks, word.as_bytes(), 0, 0, fuzz) {
+        // Fresh budget per word: the limit bounds the cost of one candidate, not
+        // of the whole scan, so a pathological word can't starve later ones.
+        let mut steps = max_steps;
+        if fuzzy_match(&toks, word.as_bytes(), 0, 0, fuzz, &mut steps) {
             Some(MatchInfo::default())
         } else {
             None
@@ -452,7 +563,11 @@ fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
     result
 }
 
-fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher, PatternError> {
+fn compile_anagram(
+    template: Option<&str>,
+    anagram_expr: &str,
+    limits: &CompileLimits,
+) -> Result<Matcher, PatternError> {
     if template.is_some_and(|t| t.contains('`')) {
         return Err(PatternError(
             "Fuzzy matching ('`N') is not supported in an anagram template".to_string(),
@@ -503,13 +618,34 @@ fn compile_anagram(template: Option<&str>, anagram_expr: &str) -> Result<Matcher
         i += 1;
     }
 
+    // `cartesian_product` materializes every combination up front, and
+    // `combo_pools` below then expands each one into 216 bytes of counter. The
+    // product is multiplicative in the number of `[...]` groups, so this grows
+    // out of reach long before the pattern looks unreasonable to a human:
+    // `;[abcde]` eight times is 390_625 combos (~84 MB), ten times is ~9.7M
+    // (~2.1 GB). Checking the size first is O(number of groups) and turns an
+    // out-of-memory abort into an error message. `checked_mul` because the
+    // product itself overflows `usize` at around 28 five-way groups.
+    let combo_count = choices
+        .iter()
+        .try_fold(1usize, |acc, c| acc.checked_mul(c.len()));
+    if combo_count.is_none_or(|n| n > limits.max_anagram_combos) {
+        return Err(PatternError(format!(
+            "Anagram is too complex: {} bracket groups expand to more than {} \
+             combinations. Use fewer or smaller '[...]' groups.",
+            choices.len(),
+            limits.max_anagram_combos
+        )));
+    }
+
     let choice_combos: Vec<Vec<char>> = if choices.is_empty() {
         vec![vec![]]
     } else {
         cartesian_product(&choices)
     };
 
-    let template_matcher: Option<Matcher> = template.map(compile_template).transpose()?;
+    let template_matcher: Option<Matcher> =
+        template.map(|t| compile_template(t, limits)).transpose()?;
     let is_pure = template.is_none();
     let template_letters: Vec<char> = template
         .map(|t| {
@@ -1201,5 +1337,108 @@ mod tests {
     #[test]
     fn test_fuzz_multiple_backticks() {
         assert!(compile_pattern("cat`1`2").is_err());
+    }
+
+    // --- Work limits ------------------------------------------------------
+    //
+    // Each of these covers a path that was previously unbounded and could hang
+    // or exhaust memory on a short, plausible-looking pattern. Every case
+    // asserts both halves: rejected/degraded under tight limits, and *unchanged*
+    // under the defaults, so the limiters can't silently narrow the language.
+
+    /// Deliberately tight limits, standing in for what a server would use.
+    fn tight() -> CompileLimits {
+        CompileLimits {
+            max_pattern_len: 64,
+            max_anagram_combos: 4_096,
+            backtrack_limit: 10_000,
+            max_fuzzy_steps: 10_000,
+        }
+    }
+
+    #[test]
+    fn test_anagram_combo_explosion_is_rejected() {
+        // 5^8 = 390_625 combos ≈ 84 MB of `combo_pools` before this cap existed.
+        let pat = format!(";{}", "[abcde]".repeat(8));
+        // `Matcher` isn't `Debug`, so match rather than `unwrap_err`.
+        match compile_pattern_with(&pat, &tight()) {
+            Err(e) => assert!(e.to_string().contains("too complex"), "unexpected: {e}"),
+            Ok(_) => panic!("combo explosion was not rejected"),
+        }
+    }
+
+    #[test]
+    fn test_anagram_combo_explosion_rejected_by_default_too() {
+        // The default limit is generous but finite: ten five-way groups is
+        // ~9.7M combos (~2.1 GB), which must not be attempted even interactively.
+        let pat = format!(";{}", "[abcde]".repeat(10));
+        assert!(compile_pattern(&pat).is_err());
+    }
+
+    #[test]
+    fn test_modest_anagram_classes_still_compile() {
+        // The shapes a person actually types must be untouched by the cap.
+        assert!(compile_pattern(";diners[ai]").is_ok());
+        assert!(compile_pattern_with(";diners[ai]", &tight()).is_ok());
+        assert!(compile_pattern(";[abc][abc][abc]").is_ok());
+    }
+
+    #[test]
+    fn test_combo_count_overflow_is_rejected_not_wrapped() {
+        // Enough groups that the product overflows `usize`; `checked_mul` must
+        // catch this rather than wrapping to a small number and being allowed.
+        let pat = format!(";{}", "[abcde]".repeat(40));
+        assert!(compile_pattern(&pat).is_err());
+    }
+
+    #[test]
+    fn test_pattern_length_cap() {
+        let long = "a".repeat(100);
+        assert!(compile_pattern_with(&long, &tight()).is_err());
+        // Well under the 1024-byte default, so ordinary use is unaffected.
+        assert!(compile_pattern(&long).is_ok());
+    }
+
+    #[test]
+    fn test_star_heavy_template_stays_bounded() {
+        // Previously up to 1M backtracking steps per word across the whole list.
+        // Under a tight limit the matcher must still *build* and still *return* —
+        // degrading to "no match" rather than hanging.
+        let m = compile_pattern_with(&format!("{}cat", "*".repeat(10)), &tight()).unwrap();
+        let _ = m("a".repeat(40).as_str());
+    }
+
+    #[test]
+    fn test_star_template_matching_is_unchanged_under_defaults() {
+        // The backtrack limit must not narrow what the language matches.
+        let m = compile_pattern("m*ja").unwrap();
+        assert!(m("maharaja").is_some()); // the star spans several letters
+        assert!(m("mja").is_some()); // and zero letters
+        assert!(m("marijuana").is_none()); // anchored: must end in "ja"
+    }
+
+    #[test]
+    fn test_fuzzy_star_stays_bounded() {
+        // The fuzzy path is a hand-rolled backtracker whose `Star` arm branches
+        // exponentially and had no step budget at all before this.
+        let m = compile_pattern_with(&format!("{}cat`3", "*".repeat(12)), &tight()).unwrap();
+        let _ = m("abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn test_fuzzy_matching_is_unchanged_under_defaults() {
+        let m = compile_pattern("cat`1").unwrap();
+        assert!(m("cat").is_some());
+        assert!(m("bat").is_some());
+        assert!(m("bar").is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_step_budget_is_per_word_not_per_scan() {
+        // A pathological word must not exhaust the budget for words after it.
+        let m = compile_pattern(&format!("{}cat`1", "*".repeat(6))).unwrap();
+        let pathological = "a".repeat(60);
+        let _ = m(&pathological);
+        assert!(m("cat").is_some(), "budget leaked across words");
     }
 }
