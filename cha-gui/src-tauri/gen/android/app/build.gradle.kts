@@ -1,3 +1,4 @@
+import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
@@ -13,6 +14,18 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Release signing. The key material lives in gen/android/keystore.properties
+// (git-ignored, created locally or written from CI secrets); Tauri's convention
+// uses a single `password` for both the store and the key, plus `keyAlias` and
+// `storeFile`. When the file is absent (e.g. a plain debug build), the config is
+// left unpopulated and only debug builds — which use the auto debug key — work.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        FileInputStream(keystorePropertiesFile).use { load(it) }
+    }
+}
+
 android {
     compileSdk = 36
     namespace = "org.saturnvalley.cha"
@@ -23,6 +36,14 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        create("release") {
+            keyAlias = keystoreProperties["keyAlias"] as String?
+            keyPassword = keystoreProperties["password"] as String?
+            storePassword = keystoreProperties["password"] as String?
+            (keystoreProperties["storeFile"] as String?)?.let { storeFile = file(it) }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -37,6 +58,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
