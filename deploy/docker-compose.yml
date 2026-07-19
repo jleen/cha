@@ -10,13 +10,17 @@
 
 services:
   cha-web:
+    # Both keys on purpose. With `build:` present, compose builds the image
+    # locally when it isn't already there and tags it with the name below — so a
+    # fresh clone just works. To use the published image instead, run
+    # `docker compose pull` first (or `up --pull always`); to force a rebuild
+    # after changing the source, `up --build`.
     image: ghcr.io/jleen/cha-web:latest
-    # To build locally instead of pulling, comment out `image:` above and
-    # uncomment this. Context is the repo root — the build needs cha-core,
-    # cha-web, and cha-gui/ui.
-    # build:
-    #   context: ..
-    #   dockerfile: deploy/Dockerfile
+    build:
+      # The repo root, not deploy/ — the build needs cha-core, cha-web, and
+      # cha-gui/ui (the front end is compiled into the binary).
+      context: ..
+      dockerfile: deploy/Dockerfile
     restart: unless-stopped
 
     # Published on loopback only, because the expected setup is a reverse proxy

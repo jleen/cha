@@ -15,3 +15,7 @@ words.txt
 # Personal Apple Development Team, sourced by gen/apple/Signing.xcconfig via a
 # relative include (never commit). Kept at the repo root so it's easy to find.
 /Signing.local.xcconfig
+
+# Word lists mounted into the cha-web container at run time (see deploy/README.md).
+# Deployment data, not source.
+deploy/dictionaries/

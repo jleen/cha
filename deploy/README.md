@@ -8,12 +8,17 @@ directory of word lists, put a reverse proxy in front of it for TLS.
 ## Quick start
 
 ```sh
-mkdir -p dictionaries
-cp /path/to/your/words.txt dictionaries/
+mkdir -p deploy/dictionaries
+cp /path/to/your/words.txt deploy/dictionaries/
 
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml --project-directory deploy up -d
 curl localhost:8080/healthz          # -> ok
 ```
+
+The compose file declares both `image:` and `build:`, so this builds locally on
+first run and works from a fresh clone. Once the image is published, `docker
+compose pull` fetches it instead; `up --build` forces a rebuild after a source
+change.
 
 Then point a reverse proxy at `127.0.0.1:8080` — see [`Caddyfile`](Caddyfile) or
 [`nginx.conf`](nginx.conf).

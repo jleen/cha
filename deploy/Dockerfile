@@ -53,7 +53,13 @@ RUN set -eux; \
     esac; \
     if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
       apt-get update; \
-      apt-get install -y --no-install-recommends "$pkg"; \
+      # libc6-dev-*-cross is required as well as the compiler, and must be named
+      # explicitly: gcc-* only *Recommends* it, so --no-install-recommends drops
+      # it and the link then fails on missing Scrt1.o/crti.o — the target's C
+      # runtime startup files, which the compiler package doesn't carry. The
+      # -cross suffix uses Debian's arch names, which happen to be exactly
+      # TARGETARCH.
+      apt-get install -y --no-install-recommends "$pkg" "libc6-dev-$TARGETARCH-cross"; \
       rm -rf /var/lib/apt/lists/*; \
       linker="$prefix-gcc"; strip_bin="$prefix-strip"; \
     else \
