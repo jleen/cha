@@ -429,6 +429,46 @@ Note axum's own extractors (body limit, JSON parse) reject with **plain text**,
 not the `{"error": ...}` envelope `ApiError` produces. That's fine — `transport.js`
 falls back to the raw body — but don't assume every error response is JSON.
 
+### Deployment (`deploy/`)
+
+`deploy/` holds the Dockerfile, a compose example, and Caddy + nginx snippets;
+`deploy/README.md` is the operator-facing doc. The release workflow publishes
+`ghcr.io/<owner>/cha-web` for amd64 and arm64 on every `v*` tag.
+
+- **The image ships no dictionary, and that's enforced explicitly.**
+  `CHA_NO_EMBED_WORDS=1` in the Dockerfile makes `build.rs` skip the embed
+  regardless of whether `words.txt` is in the build context. Don't "simplify"
+  this to just not COPYing words.txt: then whether the image has a dictionary
+  depends on an invisible property of the build context, and a missing volume
+  mount would be silently masked by a baked-in list. Local `cargo run -p cha-web`
+  still embeds, so dev stays zero-config.
+- **The Docker build context is the repo root**, not `deploy/`. `cha-web` embeds
+  `cha-gui/ui` via `include_dir!`, so the front end must be in context.
+- **`cha-gui/src-tauri/Cargo.toml` is copied into the build but never built.**
+  The workspace manifest lists it as a member, so it must exist for the manifest
+  to parse; only `-p cha-web` is built. The stub-source dance in the first stage
+  exists so the dependency fetch caches independently of source edits — if you
+  add a workspace member, add its manifest and a stub there too or the build
+  breaks at the `cargo fetch` layer.
+- **`CHA_BIND=0.0.0.0` in the image is correct** and is not a weakening of the
+  binary's loopback default. Inside a container the network namespace decides
+  reachability; binding loopback there makes the server unreachable even from the
+  host.
+- **Every flag has an `env` var** (`CHA_PORT`, `CHA_DICT_DIR`, …) so a compose
+  file configures it without a custom command line. Add both when adding a flag.
+- **`--health-check` probes `/healthz` over loopback and exits 0/1**, so the
+  runtime image needs no curl or wget. `/healthz` is routed outside the `/api`
+  router deliberately: it must not sit behind the search semaphore, or a busy
+  server reports unhealthy exactly when it's under load and gets restarted.
+- **SIGTERM is handled** (`with_graceful_shutdown`), so `docker stop` exits
+  promptly instead of waiting out its 10s timeout before SIGKILL. Measured at
+  ~60 ms.
+- **Serve at the root of a host, not a subpath.** The front end fetches `/api/…`
+  absolutely, so `example.com/cha/` breaks. Making that work means relative API
+  paths and a trailing-slash footgun; not worth it until someone needs it.
+- **Don't set a CSP at the proxy.** cha-web sets its own, and multiple CSP
+  headers intersect rather than override — the failure mode is a blank page.
+
 ### Adding a command
 
 A command must be added in **both** backends or the front end breaks on one

@@ -75,32 +75,78 @@ fn web_limits() -> SearchLimits {
     }
 }
 
+/// Every flag also reads an environment variable, so a container can be
+/// configured entirely from a compose file's `environment:` block without
+/// overriding the command line.
 #[derive(Parser)]
 #[command(name = "cha-web", about = "Serve Cha as a web app")]
 struct Args {
     /// Address to bind. Defaults to loopback: exposing the server should be a
     /// deliberate act, not something that happens because you forgot a flag.
-    #[arg(long, default_value = "127.0.0.1")]
+    /// The container image sets `CHA_BIND=0.0.0.0`, which is safe there because
+    /// the container's network namespace — not this setting — is what decides
+    /// whether anything outside can reach it.
+    #[arg(long, env = "CHA_BIND", default_value = "127.0.0.1")]
     bind: IpAddr,
 
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, env = "CHA_PORT", default_value_t = 8080)]
     port: u16,
 
-    /// Directory of additional word list files, loaded once at startup on top of
-    /// the built-in list. Same rules as the desktop app's `dictionaries/` folder.
-    #[arg(long)]
+    /// Directory of word list files, loaded once at startup. Same rules as the
+    /// desktop app's `dictionaries/` folder: every non-hidden regular file, in
+    /// sorted order, each labeled by its filename.
+    #[arg(long, env = "CHA_DICT_DIR")]
     dict_dir: Option<PathBuf>,
 
     /// Serve the front end from this directory instead of the embedded copy.
     /// Development convenience — edit `cha-gui/ui/` and reload without a rebuild.
     /// Not for production: it reads whatever is on disk at request time.
-    #[arg(long)]
+    #[arg(long, env = "CHA_UI_DIR")]
     ui_dir: Option<PathBuf>,
 
     /// Maximum searches running at once. Defaults to the CPU count, since each
     /// one saturates a core.
-    #[arg(long)]
+    #[arg(long, env = "CHA_MAX_CONCURRENT")]
     max_concurrent: Option<usize>,
+
+    /// Probe a already-running server's /healthz on this host's `--port` and
+    /// exit 0 (healthy) or 1. Used by the image's HEALTHCHECK so the runtime
+    /// stage needs no curl or wget — one static binary, nothing else.
+    #[arg(long, hide_short_help = true)]
+    health_check: bool,
+}
+
+/// One-shot liveness probe: a minimal HTTP/1.0 GET so we need no HTTP client
+/// dependency. Always talks to loopback regardless of `--bind`, since it runs
+/// inside the same container as the server it's checking.
+async fn run_health_check(port: u16) -> ! {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let result = async {
+        let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        sock.write_all(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .await?;
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).await?;
+        Ok::<_, std::io::Error>(buf)
+    }
+    .await;
+
+    match result {
+        // Checking the status line rather than the body: a proxy or error page
+        // could contain "ok" while the server is failing.
+        Ok(buf) if buf.starts_with(b"HTTP/1.0 200") || buf.starts_with(b"HTTP/1.1 200") => {
+            std::process::exit(0)
+        }
+        Ok(_) => {
+            eprintln!("health check: unexpected response");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("health check: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 struct AppState {
@@ -182,6 +228,42 @@ async fn platform() -> Json<&'static str> {
     Json("web")
 }
 
+/// Liveness probe for compose/orchestrator healthchecks and for a reverse proxy's
+/// upstream check. Deliberately plain text on a fixed path with no dependencies:
+/// it must stay cheap and must not queue behind the search semaphore, or a busy
+/// server would be reported as unhealthy and restarted exactly when it's under
+/// the most load.
+async fn healthz() -> &'static str {
+    "ok"
+}
+
+/// Wait for the signals a container runtime actually sends. `docker stop` sends
+/// SIGTERM and waits ~10s before SIGKILL; without a handler the process ignores
+/// it and every stop pays that full timeout.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutting down");
+}
+
 /// Serve the front end. `/` maps to index.html; everything else is looked up by
 /// path. `pattern-syntax.html` and its CSS fall out as ordinary files, so the
 /// help sheet works over HTTP with no special handling.
@@ -237,11 +319,22 @@ fn load_lists(dict_dir: Option<&PathBuf>) -> Result<Vec<NamedWordList>, String> 
 
     let lists = builder.finish_grouped();
     if lists.is_empty() {
-        return Err(
-            "No word list. This binary was built without words.txt at the repo root, \
-             and --dict-dir supplied no usable files."
+        // The container image is built with no embedded list on purpose, so this
+        // is the *expected* first-run failure for a container whose dictionary
+        // volume isn't mounted or is empty. Say what to do, not just what's wrong.
+        return Err(match dict_dir {
+            Some(dir) => format!(
+                "No word list. {} contains no usable word list files.\n\
+                 Add at least one plain-text file (one word per line); hidden \
+                 files and subdirectories are ignored.",
+                dir.display()
+            ),
+            None => "No word list, and no --dict-dir was given.\n\
+                     This binary has no built-in list (the container image never \
+                     embeds one), so a dictionary directory must be supplied: \
+                     pass --dict-dir, or set CHA_DICT_DIR and mount a volume there."
                 .to_string(),
-        );
+        });
     }
     Ok(lists)
 }
@@ -256,6 +349,13 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+
+    // Probe mode exits before any dictionary loading — it must stay cheap enough
+    // to run every 30s and must not depend on the server's own configuration
+    // beyond the port.
+    if args.health_check {
+        run_health_check(args.port).await;
+    }
 
     let lists = match load_lists(args.dict_dir.as_ref()) {
         Ok(lists) => lists,
@@ -299,6 +399,9 @@ async fn main() {
 
     let app = Router::new()
         .merge(api)
+        // Outside the /api router so it carries no body limit and, more
+        // importantly, never touches the search semaphore.
+        .route("/healthz", get(healthz))
         .fallback(get(asset))
         .layer(
             tower_http::set_header::SetResponseHeaderLayer::if_not_present(
@@ -318,7 +421,10 @@ async fn main() {
         }
     };
     tracing::info!("listening on http://{addr} (max {max_concurrent} concurrent searches)");
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         eprintln!("cha-web: server error: {e}");
         std::process::exit(1);
     }

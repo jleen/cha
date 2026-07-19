@@ -1,0 +1,25 @@
+# Caddy in front of cha-web. Caddy provisions and renews TLS automatically, so
+# this is the whole config.
+#
+# Pair with docker-compose.yml, which publishes cha-web on 127.0.0.1:8080.
+
+cha.example.com {
+	reverse_proxy 127.0.0.1:8080
+
+	# cha-web sets its own Content-Security-Policy. Caddy passes it through
+	# untouched; don't add a second one, since two CSP headers intersect rather
+	# than override and the result is the strictest of both.
+
+	encode gzip
+
+	# There is no authentication in cha-web. If this is on the public internet
+	# and you want it private, uncomment — `caddy hash-password` generates the
+	# hash. See the security note in README.md.
+	# basic_auth {
+	# 	someone $2a$14$...
+	# }
+
+	# Nor is there rate limiting. Caddy has no built-in limiter; if you need one,
+	# the caddy-ratelimit plugin is the usual answer. A search costs real CPU, so
+	# this matters more here than for a static site.
+}

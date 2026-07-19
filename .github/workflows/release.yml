@@ -6,6 +6,58 @@ on:
       - 'v*'
 
 jobs:
+  # The cha-web container image. Independent of the Tauri job below — a failure
+  # in one shouldn't block the other, since they ship to different places for
+  # different audiences.
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 is built under QEMU emulation, which is slow for Rust — expect the
+      # arm64 leg to dominate this job's runtime. If that becomes annoying,
+      # the alternatives are dropping arm64 or cross-compiling in the builder
+      # stage with an aarch64 linker.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercases the owner (GHCR requires it) and derives the tag list:
+      # v1.2.3 -> :1.2.3, :1.2, :latest
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/cha-web
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Repo root, not deploy/ — the build needs cha-core, cha-web, and
+          # cha-gui/ui (the front end is embedded into the binary).
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     permissions:
       contents: write
