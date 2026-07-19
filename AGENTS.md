@@ -493,26 +493,69 @@ app-store-connect` + the Transporter app. Add the tester in TestFlight (internal
 = instant; external = one-time Beta App Review). `gen/apple/ExportOptions.plist`
 starts as `method: debugging`; `--export-method` rewrites it — don't hand-edit.
 
-**Android, remote tester → signed APK.** The generated `release` build type has
-**no signing config**, so `cargo tauri android build --apk` emits an *unsigned*
-release APK that won't install. Either ship a **debug APK** (auto-signed with the
-debug key, installs by sideload, matcher still fast thanks to the `cha-core`
-opt-level profile), or sign a release APK yourself without touching the committed
-Gradle files:
-```
-keytool -genkeypair -v -keystore ~/keystores/cha-release.jks -alias cha \
-  -keyalg RSA -keysize 2048 -validity 10000                    # once
-cargo tauri android build --apk --target aarch64               # arm64 = modern phones
-"$ANDROID_HOME/build-tools/34.0.0/zipalign" -f 4 \
-  gen/android/app/build/outputs/apk/arm64/release/app-arm64-release-unsigned.apk /tmp/a.apk
-"$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
-  --ks ~/keystores/cha-release.jks --out cha.apk /tmp/a.apk
-```
-Get it on the phone with `adb install cha.apk` (USB debugging) or just send the
-file. **Updates must keep the same signing key and a higher `versionCode`** (also
-crate-version-derived), or Android refuses the install. Scaling past one tester
-is Play Console internal testing, which wants an **AAB** (`--aab`), not an APK.
-Omitting `--target` builds a ~130 MB universal APK (all four ABIs).
+**Android, remote tester → signed APK.** Release signing is wired into the build
+(see the next section), so `cargo tauri android build --apk` emits a *signed*,
+installable release APK directly — the output is
+`gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
+`adb install` it or send the file. **Updates must keep the same signing key and a
+higher `versionCode`** (crate-version-derived, in the git-ignored
+`gen/android/app/tauri.properties`), or Android refuses the install. Scaling past
+one tester is Play Console internal testing, which wants the **AAB** (`--aab`).
+
+### Release signing and mobile CI
+
+**Android signing lives in Gradle, driven by a git-ignored properties file.**
+[`gen/android/app/build.gradle.kts`](cha-gui/src-tauri/gen/android/app/build.gradle.kts)
+has a `signingConfigs { create("release") { … } }` block (added by hand — this
+file is generated once and then owned by us, *unlike* the iOS pbxproj) that reads
+`rootProject.file("keystore.properties")`. Tauri's convention uses a **single
+`password`** for both the store and the key, plus `keyAlias` and `storeFile` —
+not separate store/key passwords. The casts are nullable (`as String?`) and
+`storeFile` is guarded, so a build with **no** `keystore.properties` (a plain
+debug build, or a fresh clone) still works instead of throwing; only release
+signing goes unpopulated.
+- `gen/android/keystore.properties` is **git-ignored** (by `gen/android/.gitignore`)
+  and holds `password`/`keyAlias=upload`/`storeFile=<abs path>`. The `.jks` lives
+  **outside the repo** (`~/keystores/cha-upload.jks`); never commit either.
+- **Generate the key once:** `keytool -genkeypair -v -keystore
+  ~/keystores/cha-upload.jks -keyalg RSA -keysize 2048 -validity 10000 -alias
+  upload`. The DN fields (CN/OU/O/…) are cosmetic — Android/Play validate only the
+  key's algorithm, validity, and cross-update consistency, never the DN text.
+  **Losing the password or the `.jks` means you can never update the app** for
+  existing installs. Verify a build with
+  `build-tools/…/apksigner verify --print-certs <apk>`.
+- **The real release risk is R8, not signing.** `release` has
+  `isMinifyEnabled = true`; a signed APK that *builds* can still crash if proguard
+  strips Tauri/webview classes. Always install-and-run the release APK, don't just
+  build it. (Verified clean with the current Tauri proguard rules.)
+
+**Mobile CI is [`.github/workflows/mobile.yml`](.github/workflows/mobile.yml)**,
+separate from the desktop `release.yml`. `workflow_dispatch` build-checks both
+platforms and uploads artifacts; a `mobile-v*` tag additionally attaches the
+signed Android APK + AAB to a (draft) GitHub release.
+- **Android job** (`ubuntu-latest`): setup-java 17 → setup-android → `sdkmanager
+  "ndk;<NDK_VERSION>"` → rust-toolchain with the 4 android targets → cargo-binstall
+  tauri-cli → decode `ANDROID_KEYSTORE_BASE64` + write `keystore.properties` from
+  secrets → `cargo tauri android build --apk --aab`.
+- **iOS job** (`macos-latest`): **build-check only** — `cargo tauri ios build
+  --target aarch64-sim --no-sign` builds the Simulator `.app` with **no signing,
+  no secrets** (the Simulator target skips IPA export, also dodging the `ios
+  build`/`run` export-plist bug). Producing a *distributable* iOS build later
+  (TestFlight) is the paid-tier add: it needs `IOS_CERTIFICATE` /
+  `IOS_CERTIFICATE_PASSWORD` / `IOS_MOBILE_PROVISION` plus the existing
+  `APPLE_API_*` App Store Connect key, and a `--export-method app-store-connect`
+  build + upload — deliberately deferred.
+- **`words.txt` in CI:** it's git-ignored and `build.rs` hard-errors without it,
+  and it's too big (639 KB) for a 48 KB GitHub secret. Both jobs run a
+  "materialize words.txt" step: **`WORDS_URL` secret if set, else the committed
+  `ci/words-stub.txt`** (a ~2k-word public-domain placeholder — real enough that a
+  search returns matches, but *not* shippable). This is the upgrade seam: host the
+  real list, add a `WORDS_URL` secret, and tagged builds ship the real dictionary
+  with **no workflow edit**. Until then, CI release assets carry only the stub.
+- **Secrets to add now** (repo Settings → Secrets and variables → Actions):
+  `ANDROID_KEYSTORE_BASE64` (`base64 -i ~/keystores/cha-upload.jks | pbcopy`),
+  `ANDROID_KEY_PASSWORD`, `ANDROID_KEY_ALIAS` (=`upload`). The Android job hard-fails
+  fast if `ANDROID_KEYSTORE_BASE64` is missing rather than shipping an unsigned APK.
 
 ## What to avoid
 
