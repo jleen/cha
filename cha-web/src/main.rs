@@ -114,6 +114,117 @@ struct Args {
     /// stage needs no curl or wget — one static binary, nothing else.
     #[arg(long, hide_short_help = true)]
     health_check: bool,
+
+    /// Time this pattern against the configured dictionary and exit instead of
+    /// serving. Answers "is this machine too slow, or is this pattern
+    /// expensive?" on the deployment itself, where the guards actually fire —
+    /// the numbers from a developer laptop don't transfer.
+    #[arg(long, value_name = "PATTERN")]
+    bench: Option<String>,
+
+    /// Iterations for --bench. A large dictionary makes each one expensive, so
+    /// this defaults low; raise it for a steadier mean on small lists.
+    #[arg(long, default_value_t = 20, value_name = "N")]
+    bench_count: u32,
+}
+
+/// Group digits so six- and seven-figure word counts are readable at a glance.
+fn commas(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Time `pattern` against the loaded dictionary and exit.
+///
+/// Deliberately runs with the *server's* compile limits but **no deadline**: the
+/// point is to learn the true cost of the scan, and a deadline would just report
+/// a timeout without saying by how much it was missed. The verdict at the end
+/// compares the measured mean against the deadline the server would apply.
+fn run_bench(lists: &[NamedWordList], pattern: &str, iterations: u32) -> ! {
+    let limits = SearchLimits {
+        deadline: None,
+        ..web_limits()
+    };
+    let words: usize = lists.iter().map(|l| l.words.len()).sum();
+    let cpus = std::thread::available_parallelism().map_or(0, |n| n.get());
+
+    println!("cha-web benchmark");
+    println!("  binary arch   {}", std::env::consts::ARCH);
+    println!("  cpus visible  {cpus}");
+    println!(
+        "  dictionary    {} list(s), {} words",
+        lists.len(),
+        commas(words)
+    );
+    println!("  pattern       {pattern}");
+    println!(
+        "  limits        max_results={} backtrack={} fuzzy={} (no deadline while timing)",
+        limits.max_results, limits.compile.backtrack_limit, limits.compile.max_fuzzy_steps
+    );
+
+    // One unmeasured pass: the first scan faults in the whole word list and
+    // warms the caches, and would otherwise be reported as a slow outlier.
+    let first = match search::search(lists, pattern, &limits) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("\n  pattern rejected: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut times = Vec::with_capacity(iterations as usize);
+    for _ in 0..iterations {
+        let t0 = Instant::now();
+        let _ = search::search(lists, pattern, &limits);
+        times.push(t0.elapsed());
+    }
+    times.sort();
+    let min = times.first().copied().unwrap_or_default();
+    let max = times.last().copied().unwrap_or_default();
+    let mean = times.iter().sum::<Duration>() / times.len().max(1) as u32;
+
+    println!("\n  iterations    {iterations}");
+    println!(
+        "  per search    min {:.1}ms   mean {:.1}ms   max {:.1}ms",
+        min.as_secs_f64() * 1000.0,
+        mean.as_secs_f64() * 1000.0,
+        max.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  matches       {} returned, {} total",
+        first.groups.iter().map(|g| g.matches.len()).sum::<usize>(),
+        commas(first.total)
+    );
+
+    let budget = SEARCH_TIMEOUT.as_secs_f64();
+    let secs = mean.as_secs_f64();
+    println!();
+    if secs > budget {
+        println!(
+            "  VERDICT  {:.0}ms EXCEEDS the {:.0}s request deadline — this pattern times out here.",
+            secs * 1000.0,
+            budget
+        );
+        println!("           Either the list is too large for this CPU, or the pattern shape is");
+        println!("           expensive (leading `*` and fuzzy patterns cost far more than a");
+        println!("           fixed-length template). Compare against a cheap pattern of the same");
+        println!("           length to tell those apart.");
+    } else {
+        println!(
+            "  VERDICT  {:.0}ms, {:.0}% of the {:.0}s request deadline — comfortable.",
+            secs * 1000.0,
+            secs / budget * 100.0,
+            budget
+        );
+    }
+    std::process::exit(0);
 }
 
 /// One-shot liveness probe: a minimal HTTP/1.0 GET so we need no HTTP client
@@ -364,10 +475,20 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(pattern) = args.bench.as_deref() {
+        run_bench(&lists, pattern, args.bench_count);
+    }
+
     let total: usize = lists.iter().map(|l| l.words.len()).sum();
+    // The architecture is logged because a foreign-arch image running under
+    // emulation is 10-30x slower and otherwise looks exactly like slow hardware.
+    // Compare this against `uname -m` on the host: a mismatch is the answer.
     tracing::info!(
-        "loaded {} word list(s), {total} words: {}",
+        "cha-web {} on {}: loaded {} word list(s), {} words: {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
         lists.len(),
+        commas(total),
         lists
             .iter()
             .map(|l| l.name.as_str())
