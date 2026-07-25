@@ -39,6 +39,7 @@ fn main() {
         "styles.css",
         "pattern-syntax.html",
         "pattern-syntax.css",
+        "license.html",
     ] {
         println!("cargo::rerun-if-changed=../cha-gui/ui/{f}");
     }

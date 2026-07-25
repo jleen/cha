@@ -102,3 +102,22 @@ pre code {
   font-size: 13px;
   line-height: 1.5;
 }
+
+a {
+  color: var(--accent);
+}
+
+/* Link to license.html, set off from the reference material above it. The
+   padding keeps it a comfortable tap target on mobile without making it look
+   like a button. */
+.footer {
+  margin: 28px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.footer a {
+  display: inline-block;
+  padding: 6px 0;
+}

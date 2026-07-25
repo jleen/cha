@@ -105,13 +105,8 @@ function enableNewWindowShortcut() {
   });
 }
 
-// Whether the cheat sheet has been loaded into the iframe. An explicit flag
-// rather than testing `helpFrame.src`, because the load below deliberately
-// doesn't set it.
-let helpLoaded = false;
-
 // Open the pattern-syntax cheat sheet in a full-screen sheet. Loaded lazily on
-// first open, so desktop (which never opens it) never fetches it. Pushing a
+// open, so desktop (which never opens it) never fetches it. Pushing a
 // history entry lets Android's hardware Back button close the sheet instead of
 // the app; the popstate handler below completes that.
 //
@@ -124,10 +119,13 @@ let helpLoaded = false;
 // contributing a history entry at all, which sidesteps the ordering entirely.
 function openHelp() {
   helpSheet.hidden = false;
-  if (!helpLoaded) {
-    helpFrame.contentWindow.location.replace("pattern-syntax.html");
-    helpLoaded = true;
-  }
+  // Navigate on every open rather than only the first. The sheet is two pages
+  // now — the cheat sheet's footer links to license.html — and whichever one
+  // the user was last looking at is where the iframe is still parked, so
+  // without this the ? button would sometimes open the licenses. Re-navigating
+  // costs one local fetch and also resets the scroll position, which is what a
+  // freshly opened sheet should do anyway.
+  helpFrame.contentWindow.location.replace("pattern-syntax.html");
   input.blur(); // dismiss the on-screen keyboard
   history.pushState({ help: true }, "");
 }
