@@ -1,0 +1,268 @@
+name: iOS TestFlight
+
+# Manual only, deliberately. This is the one workflow that signs with the
+# distribution certificate and pushes a build to real testers, so it should
+# never fire off a push or a tag by accident — and App Store Connect refuses a
+# duplicate CFBundleVersion, so every wasted run burns a build number.
+#
+# The cheap, secret-less iOS build-check lives in mobile.yml and stays there;
+# this workflow is the signed-distribution path and needs the Apple secrets
+# listed below. Splitting them keeps mobile.yml runnable without any Apple
+# account at all.
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: 'Upload to App Store Connect (uncheck to only produce the IPA artifact)'
+        type: boolean
+        default: true
+      build_number:
+        description: 'CFBundleVersion override (default: this run number)'
+        type: string
+        required: false
+
+# Two concurrent uploads would race for the same build number. Queue instead of
+# cancelling: a run that already uploaded shouldn't be killed mid-flight.
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    runs-on: macos-15
+
+    steps:
+      # words.txt is committed and freely redistributable, so the checkout puts
+      # a shippable dictionary at the repo root where build.rs expects it. A
+      # build that shipped a placeholder list would be worse than no build.
+      - uses: actions/checkout@v4
+
+      # Pin rather than inherit whatever the runner image happens to ship.
+      # Xcode churn on the hosted images is the usual cause of a signing setup
+      # that worked last month failing today, and the failure surfaces as an
+      # inscrutable codesign error rather than "your Xcode changed".
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The Xcode target's "Build Rust Code" pre-build phase shells out to
+      # `cargo tauri ios xcode-script`, so tauri-cli has to be on PATH before
+      # xcodebuild runs — the archive builds the Rust staticlib, not just the
+      # Objective-C shim.
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install Tauri CLI
+        run: cargo binstall -y 'tauri-cli@^2'
+
+      # Fail loudly and early rather than 20 minutes later inside codesign.
+      - name: Check required secrets
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_PROVISION_PROFILE: ${{ secrets.IOS_PROVISION_PROFILE }}
+        run: |
+          missing=
+          for v in APPLE_TEAM_ID IOS_DIST_CERT_P12 IOS_DIST_CERT_PASSWORD IOS_PROVISION_PROFILE; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required secret(s):$missing — see AGENTS.md, 'iOS release signing'."
+            exit 1
+          fi
+
+      # A throwaway keychain, not the login keychain: it's deleted at the end of
+      # the job, and it keeps the distribution key out of any keychain the rest
+      # of the runner might touch. set-key-partition-list is the step everyone
+      # forgets — without it codesign blocks on a GUI password prompt that will
+      # never be answered, and the job hangs until it times out.
+      - name: Import signing certificate
+        env:
+          IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Six hours, and no lock-on-sleep: the default five-minute idle lock
+          # will re-lock the keychain in the middle of a long archive.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$IOS_DIST_CERT_P12" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          # -T grants access to just codesign and security. Don't "simplify" this
+          # to -A (allow any application): -A overrides the -T list and hands the
+          # private key to every process on the runner.
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" \
+            -P "$IOS_DIST_CERT_PASSWORD" -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/dist.p12"
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+
+          # Prepend to the search list rather than replace it; xcodebuild still
+          # needs the system roots to chain the Apple WWDR intermediate.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          echo "Identities available:"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      # The profile's own payload carries its name, so there's no separate
+      # profile-name secret to keep in sync with what you named it on Apple's
+      # site — one less thing to get subtly wrong a year from now at renewal.
+      - name: Install provisioning profile
+        env:
+          IOS_PROVISION_PROFILE: ${{ secrets.IOS_PROVISION_PROFILE }}
+        run: |
+          echo "$IOS_PROVISION_PROFILE" | base64 --decode > "$RUNNER_TEMP/pp.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/pp.mobileprovision" > "$RUNNER_TEMP/pp.plist"
+
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/pp.plist")
+          NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/pp.plist")
+          EXPIRY=$(/usr/libexec/PlistBuddy -c 'Print :ExpirationDate' "$RUNNER_TEMP/pp.plist")
+
+          # Xcode only looks here, and only by UUID filename.
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          cp "$RUNNER_TEMP/pp.mobileprovision" "$PROFILE_DIR/$UUID.mobileprovision"
+
+          echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+          echo "Installed profile '$NAME' ($UUID), expires $EXPIRY."
+
+      # [workspace.package] version in the root Cargo.toml is the single source
+      # of truth for the marketing version — the same value release.yml's
+      # verify-version job gates the desktop release on. The build number is
+      # separate and only has to increase: App Store Connect rejects a repeat of
+      # a (CFBundleShortVersionString, CFBundleVersion) pair, and the run number
+      # is monotonic for free.
+      - name: Derive version and build number
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
+          BUILD_NUMBER="${{ inputs.build_number || github.run_number }}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "Building Cha $VERSION ($BUILD_NUMBER)."
+
+      # Signing is set on the command line rather than in an xcconfig because
+      # the target's build settings in project.pbxproj already pin
+      # CODE_SIGN_IDENTITY (to "iPhone Developer") and would outrank
+      # Signing.xcconfig. Command-line settings outrank everything, so this
+      # needs no edits to the generated project. MARKETING_VERSION and
+      # CURRENT_PROJECT_VERSION land in Info.plist via $(...) references.
+      #
+      # -project, not -workspace: the Podfile was never run, so there is no Pods
+      # workspace, and the .xcworkspace in gen/apple only references itself.
+      # -configuration release is lowercase — XcodeGen named the configs
+      # debug/release, not Debug/Release.
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -project cha-gui/src-tauri/gen/apple/cha-gui.xcodeproj \
+            -scheme cha-gui_iOS \
+            -configuration release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Cha.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
+
+      # Written fresh into RUNNER_TEMP rather than reusing the committed
+      # gen/apple/ExportOptions.plist: that file says `method: debugging` and is
+      # owned by tauri-cli, which rewrites it on `tauri ios build`. Leave it be.
+      - name: Export IPA
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>destination</key>
+            <string>export</string>
+            <key>teamID</key>
+            <string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>org.saturnvalley.cha</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          # No -allowProvisioningUpdates: signing is manual and the profile is
+          # already on disk. Letting Xcode reach out to Apple here is how you
+          # end up with a silently regenerated profile or a burned cert slot.
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Cha.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+
+          IPA=$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' | head -1)
+          [ -n "$IPA" ] || { echo "::error::No .ipa produced by exportArchive."; exit 1; }
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+
+          echo "Signed by:"
+          codesign -dv --verbose=2 "$RUNNER_TEMP/Cha.xcarchive/Products/Applications/Cha.app" 2>&1 | grep -E 'Authority|Identifier' || true
+
+      # Always, even when uploading: if the upload fails, or App Store Connect
+      # rejects processing, the artifact is what you retry from without paying
+      # for another 20-minute archive. dSYMs go too — TestFlight crash reports
+      # from a Rust staticlib are unreadable without them.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ env.VERSION }}-${{ env.BUILD_NUMBER }}
+          path: |
+            ${{ env.IPA }}
+            ${{ runner.temp }}/Cha.xcarchive/dSYMs
+          if-no-files-found: error
+
+      # altool finds the key by ID under one of a few fixed directories; there
+      # is no flag to point it at an arbitrary path.
+      - name: Upload to App Store Connect
+        if: ${{ inputs.upload }}
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          if [ -z "$APPLE_API_KEY" ] || [ -z "$APPLE_API_ISSUER" ] || [ -z "$APPLE_API_KEY_CONTENT" ]; then
+            echo "::error::APPLE_API_KEY / APPLE_API_ISSUER / APPLE_API_KEY_CONTENT are required to upload. Re-run with 'upload' unchecked to just get the IPA."
+            exit 1
+          fi
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APPLE_API_KEY_CONTENT" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_"$APPLE_API_KEY".p8
+
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
+
+          echo "Uploaded Cha $VERSION ($BUILD_NUMBER). Processing in App Store Connect usually takes 5-20 minutes."
+
+      # The runner is ephemeral, but a job that fails between import and archive
+      # would otherwise leave the key sitting in a keychain for the rest of the
+      # run, and the ASC key on disk.
+      - name: Clean up signing material
+        if: always()
+        run: |
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          rm -rf ~/.appstoreconnect/private_keys

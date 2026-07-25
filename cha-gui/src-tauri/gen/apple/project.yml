@@ -51,8 +51,16 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.5.0
-        CFBundleVersion: "0.5.0"
+        # Indirected through build settings so CI can inject the workspace
+        # version from Cargo.toml on the xcodebuild command line — see the
+        # MARKETING_VERSION/CURRENT_PROJECT_VERSION fallbacks below. Keep
+        # cha-gui_iOS/Info.plist in sync; nothing runs XcodeGen in CI.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # The app is fully offline — no network, no crypto beyond what iOS
+        # itself provides. Answering export compliance here keeps every
+        # TestFlight build from parking in "Missing Compliance".
+        ITSAppUsesNonExemptEncryption: false
     entitlements:
       path: cha-gui_iOS/cha-gui_iOS.entitlements
     configFiles:
@@ -64,6 +72,13 @@ targets:
         RUST_LOG: info
     settings:
       base:
+        # Fallbacks for local Xcode / `tauri ios dev` builds only. Distribution
+        # builds get both overridden on the xcodebuild command line from
+        # [workspace.package] version in the root Cargo.toml, so there is still
+        # exactly one source of truth for anything that ships. App Store Connect
+        # rejects a duplicate CFBundleVersion, hence the separate build number.
+        MARKETING_VERSION: 0.5.1
+        CURRENT_PROJECT_VERSION: 1
         ENABLE_BITCODE: false
         ARCHS: [arm64]
         VALID_ARCHS: arm64 

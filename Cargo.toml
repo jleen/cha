@@ -5,7 +5,8 @@ members = ["cha-core", "cha-gui/src-tauri", "cha-web"]
 # via `version.workspace = true`, and the Tauri bundle version chains off
 # cha-gui's crate version (tauri.conf.json deliberately has no `version` field),
 # so this line alone sets the CLI, the desktop/mobile app, and the web server.
-# The Apple files under gen/apple are the one exception — see AGENTS.md.
+# iOS reads it too: ios-testflight.yml parses this value and passes it to
+# xcodebuild as MARKETING_VERSION, which Info.plist references.
 [workspace.package]
 version = "0.5.1"
 

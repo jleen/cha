@@ -2,8 +2,9 @@ name: Mobile
 
 # Separate from release.yml (desktop). Manual runs build-check both platforms and
 # upload artifacts; a `mobile-v*` tag additionally attaches the signed Android
-# APK + AAB to a GitHub release. iOS is a Simulator build-check only for now — no
-# signing, no secrets, no distribution (TestFlight is a later add).
+# APK + AAB to a GitHub release. iOS here is a build-check only — no signing, no
+# secrets, no distribution — so this workflow stays runnable by anyone. Signed
+# iOS distribution lives in ios-testflight.yml.
 on:
   workflow_dispatch:
   push:
@@ -20,23 +21,10 @@ jobs:
     permissions:
       contents: write # for softprops/action-gh-release on tag runs
     steps:
+      # words.txt is committed and freely redistributable, so this checkout
+      # alone puts a shippable dictionary where build.rs expects it (repo root).
+      # Nothing to materialize — see AGENTS.md, "words.txt in CI".
       - uses: actions/checkout@v4
-
-      # words.txt is git-ignored and build.rs hard-errors without it. With no
-      # WORDS_URL secret set, CI uses the committed stub (build-check, NOT a
-      # shippable dictionary). Host the real list and add a WORDS_URL secret to
-      # turn tagged builds into real releases — no workflow edit needed.
-      - name: Materialize words.txt
-        env:
-          WORDS_URL: ${{ secrets.WORDS_URL }}
-        run: |
-          if [ -n "$WORDS_URL" ]; then
-            curl -fSL "$WORDS_URL" -o words.txt
-            echo "Using production word list from WORDS_URL ($(wc -l < words.txt) lines)."
-          else
-            cp ci/words-stub.txt words.txt
-            echo "::warning::Using ci/words-stub.txt placeholder dictionary. Set the WORDS_URL secret to ship the real word list."
-          fi
 
       - uses: actions/setup-java@v4
         with:
@@ -109,17 +97,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Materialize words.txt
-        env:
-          WORDS_URL: ${{ secrets.WORDS_URL }}
-        run: |
-          if [ -n "$WORDS_URL" ]; then
-            curl -fSL "$WORDS_URL" -o words.txt
-          else
-            cp ci/words-stub.txt words.txt
-            echo "::warning::Using ci/words-stub.txt placeholder dictionary."
-          fi
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
@@ -129,9 +106,11 @@ jobs:
       # Build-check only: cross-compile the shared library for iOS (the device
       # target — arch-agnostic, so it works whichever arch the runner is). This
       # catches the breakage that matters, the shared Rust code compiling and
-      # linking for iOS, without an Xcode *archive* (which insists on a signing
-      # team CI doesn't have — the repo-root Signing.local.xcconfig is git-ignored)
-      # and without any Apple secrets. Building the full signed .app/IPA is the
-      # deferred TestFlight work. Runs on macOS because the iOS SDK is Xcode-only.
+      # linking for iOS, in ~a minute and with no Apple secrets, so it stays
+      # useful as a fast sanity check on every manual run. The signed archive +
+      # IPA + TestFlight upload is ios-testflight.yml, which is deliberately
+      # separate: it needs the distribution cert and profile, and coupling it to
+      # this workflow would make every Android run depend on Apple secrets.
+      # Runs on macOS because the iOS SDK is Xcode-only.
       - name: Build-check (cross-compile lib for iOS)
         run: cargo build -p cha-gui --lib --target aarch64-apple-ios

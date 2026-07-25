@@ -67,17 +67,26 @@ the user and must not build. See the mobile section.
   tag, *not* from the source. The `verify-version` job in `release.yml` gates
   both release jobs on the tag matching this version, so a `v0.6.0` tag on a
   0.5.0 tree fails before anything reaches GHCR.
+- **iOS's `CFBundleShortVersionString`/`CFBundleVersion`** — indirected through
+  build settings. `gen/apple/cha-gui_iOS/Info.plist` holds `$(MARKETING_VERSION)`
+  and `$(CURRENT_PROJECT_VERSION)` rather than literals, and
+  [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) sets both on the
+  `xcodebuild` command line — the marketing version parsed out of this same
+  `Cargo.toml`, the build number from the run number. Command-line build settings
+  outrank the project, so **nothing that ships can drift.** The literals still
+  present in `project.yml` and `project.pbxproj` are fallbacks for *local* Xcode
+  and `tauri ios dev` builds only; they're cosmetic and don't need chasing on
+  every bump — with one exception, a hand-driven Organizer archive, which does
+  read them (see "iOS, remote tester → TestFlight" below). (Why a separate build
+  number at all: App Store Connect rejects a
+  repeat of a `(CFBundleShortVersionString, CFBundleVersion)` pair, so re-uploading
+  a fixed build of the same version needs a number that only ever increases.)
+  Keep `project.yml` and `Info.plist` in sync by hand — nothing runs XcodeGen in
+  CI, and `tauri ios init` would clobber the hand edits in `project.yml` (the
+  `PATH` preBuildScript, `ARCHS`, `LIBRARY_SEARCH_PATHS`).
 
-**The one exception is iOS.** `gen/apple/project.yml` carries literal
-`CFBundleShortVersionString`/`CFBundleVersion` strings, and
-`gen/apple/cha-gui_iOS/Info.plist` is generated *from* them by XcodeGen — but
-nothing in CI runs XcodeGen, and `tauri ios init` would clobber the hand edits in
-`project.yml` (the `PATH` preBuildScript, `ARCHS`, `LIBRARY_SEARCH_PATHS`). So
-those four strings must be updated **by hand** alongside the workspace version.
-Until iOS is actually distributed this is a cosmetic drift; before the first
-TestFlight upload, either add a CI check that asserts they match or fold the
-version into an `.xcconfig`. One accepted cost of dropping `version` from
-`tauri.conf.json`: a macOS `tauri dev` run's embedded `Info.plist` no longer gets
+One accepted cost of dropping `version` from `tauri.conf.json`: a macOS
+`tauri dev` run's embedded `Info.plist` no longer gets
 `CFBundleShortVersionString` (that codegen branch is gated on the field being
 present, and on `dev` — release bundles are unaffected).
 
@@ -757,17 +766,43 @@ survives unplugging, prefer `cargo tauri ios dev --release --no-watch "<device>"
 — it installs a release build directly and sidesteps `ios run`'s broken
 IPA-export step (`Couldn't load -exportOptionsPlist … no such file`).
 
-**iOS, remote tester → TestFlight (paid).** Register the app id
-`org.saturnvalley.cha` in App Store Connect; set your real Team in the Xcode
-project; **bump the version** (App Store Connect rejects a duplicate
-`CFBundleVersion`, and Tauri derives it from the crate version, so bump the patch
-under `[workspace.package]` in the root `Cargo.toml` — and, for iOS specifically,
-the hand-maintained strings in `gen/apple/`; see "Versioning" above); archive &
-upload via the Xcode Organizer (Product →
-Archive → Distribute → TestFlight) or `cargo tauri ios build --export-method
-app-store-connect` + the Transporter app. Add the tester in TestFlight (internal
-= instant; external = one-time Beta App Review). `gen/apple/ExportOptions.plist`
-starts as `method: debugging`; `--export-method` rewrites it — don't hand-edit.
+**iOS, remote tester → TestFlight (paid).** The normal path is CI: run the
+**iOS TestFlight** workflow from the Actions tab (manual trigger only; see
+"Release signing and mobile CI" below for the one-time Apple setup and the
+secrets). It archives, signs, exports, and uploads; uncheck `upload` to get just
+the IPA as an artifact. You do **not** need to bump the version to re-upload — the
+build number comes from the run number, and only the `(version, build)` pair has
+to be unique.
+
+Adding testers is still web-UI work in App Store Connect: **internal** testers
+must be members of your ASC team but need no review and appear immediately;
+**external** testers can be any email address (or a public link, up to 10,000),
+but the first build sent to an external group goes through a one-time Beta App
+Review. Builds expire after 90 days. Export compliance is pre-answered by
+`ITSAppUsesNonExemptEncryption=false` in `Info.plist`, so builds don't park in
+"Missing Compliance" — the app is fully offline and that answer stays true only
+as long as it is.
+
+The manual fallback, if CI is broken or you want to watch it happen: `cargo tauri
+ios open`, then Product → Archive → Distribute → TestFlight in the Xcode
+Organizer. `gen/apple/ExportOptions.plist` starts as `method: debugging` and is
+rewritten by `cargo tauri ios build --export-method` — don't hand-edit it, and
+note the CI workflow deliberately ignores it and writes its own into `RUNNER_TEMP`.
+**On this path you must set the version by hand**: a local archive reads the
+`MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` literals in `project.pbxproj`,
+which CI normally overrides and which nothing keeps current. Left alone they
+produce a stale marketing version and a build number of `1`, which App Store
+Connect rejects as a duplicate. Bump both in the Xcode target's build settings
+before archiving (and don't commit the bumped build number — it's a CI counter).
+
+**iOS, TestFlight → App Store.** No rebuild and no CI change: TestFlight builds
+*are* App Store builds. In App Store Connect, create the version, pick an already-
+uploaded build, and submit. What's missing is listing material — screenshots
+(iPhone 6.9" **and** 13" iPad, because `TARGETED_DEVICE_FAMILY = "1,2"`), the
+privacy questionnaire ("Data Not Collected" — the app has no network), a live
+privacy-policy URL, age rating, and category. Full App Review, not the beta kind.
+Guideline 4.2 (minimum functionality) is the realistic risk for a single-purpose
+utility, which is why the shipped build must carry the full `words.txt`.
 
 **Android, remote tester → signed APK.** Release signing is wired into the build
 (see the next section), so `cargo tauri android build --apk` emits a *signed*,
@@ -815,29 +850,78 @@ signed Android APK + AAB to a (draft) GitHub release.
   secrets → `cargo tauri android build --apk --aab`.
 - **iOS job** (`macos-latest`): **build-check only** — `cargo build -p cha-gui
   --lib --target aarch64-apple-ios` cross-compiles the shared library with **no
-  Xcode archive, no signing, no secrets**. `cargo tauri ios build` was tried first
-  but it always *archives* (device), which needs a signing team CI doesn't have
-  (the repo-root `Signing.local.xcconfig` is git-ignored) — so it fails on the
-  runner even with `--no-sign`/a Simulator target, and only "worked" locally
-  because this Mac has a cert. The cross-compile catches the breakage that matters
-  (the shared Rust code building for iOS), is arch-agnostic, and needs macOS only
-  because the iOS SDK is Xcode-only. Producing a *signed* iOS build (let alone
-  TestFlight) is the paid-tier follow-up: iOS needs an **iOS-type** cert (Apple
-  Development/Distribution — the macOS `APPLE_*`/Developer ID secrets can't sign
-  iOS) plus a provisioning profile or App Store Connect API-key automatic signing,
-  then `cargo tauri ios build --archive-only` (sign, no upload) or
-  `--export-method app-store-connect` (TestFlight). Deliberately deferred.
-- **`words.txt` in CI:** it's git-ignored and `build.rs` hard-errors without it,
-  and it's too big (639 KB) for a 48 KB GitHub secret. Both jobs run a
-  "materialize words.txt" step: **`WORDS_URL` secret if set, else the committed
-  `ci/words-stub.txt`** (a ~2k-word public-domain placeholder — real enough that a
-  search returns matches, but *not* shippable). This is the upgrade seam: host the
-  real list, add a `WORDS_URL` secret, and tagged builds ship the real dictionary
-  with **no workflow edit**. Until then, CI release assets carry only the stub.
+  Xcode archive, no signing, no secrets**, so this workflow stays runnable by
+  anyone with a clone. `cargo tauri ios build` was tried here first but it always
+  *archives* (device), which needs a signing team — so it fails on a runner
+  without one, and only "worked" locally because this Mac has a cert. The
+  cross-compile catches the breakage that matters (the shared Rust code building
+  for iOS), is arch-agnostic, and needs macOS only because the iOS SDK is
+  Xcode-only. **Signed iOS distribution is a separate workflow** (below), kept
+  apart so an Android run never depends on Apple secrets.
+- **`words.txt` in CI:** nothing to do. It's committed, freely redistributable,
+  and `actions/checkout` puts it at the repo root where `build.rs` looks. The old
+  `WORDS_URL`-or-`ci/words-stub.txt` "materialize" step is **gone** — it existed
+  when the list was git-ignored, and once the list was committed it actively
+  overwrote the real dictionary with a 2k-word placeholder.
 - **Secrets to add now** (repo Settings → Secrets and variables → Actions):
   `ANDROID_KEYSTORE_BASE64` (`base64 -i ~/keystores/cha-upload.jks | pbcopy`),
   `ANDROID_KEY_PASSWORD`, `ANDROID_KEY_ALIAS` (=`upload`). The Android job hard-fails
   fast if `ANDROID_KEYSTORE_BASE64` is missing rather than shipping an unsigned APK.
+
+**iOS release signing is
+[`.github/workflows/ios-testflight.yml`](.github/workflows/ios-testflight.yml)**,
+`workflow_dispatch` only — no tag trigger, no push trigger. It's the one workflow
+that holds the distribution certificate, and a stray run burns a build number.
+Inputs: `upload` (default on; uncheck to stop after the IPA artifact) and
+`build_number` (default: the run number).
+
+- **Manual signing, not automatic.** The job imports an `Apple Distribution`
+  `.p12` into a throwaway keychain and installs a downloaded App Store
+  provisioning profile; nothing calls out to Apple at build time, so a build
+  can't silently mint a new profile or burn one of the three cert slots. It reads
+  the profile's **`Name` out of the profile itself** rather than taking it as a
+  secret — one less thing to keep in sync at the yearly renewal.
+- **Signing settings go on the `xcodebuild` command line**, not in
+  `Signing.xcconfig`. `project.pbxproj` sets `CODE_SIGN_IDENTITY` in the
+  *target's* build settings, which outranks the xcconfig attached to that same
+  target; command-line settings outrank everything. That's also how
+  `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` get injected. **Don't "fix" this
+  by moving it into the xcconfig** — it will silently not take effect.
+- `security set-key-partition-list` after the import is load-bearing. Without it
+  `codesign` blocks on a GUI keychain prompt nobody can answer and the job hangs
+  until it times out.
+- **Raw `xcodebuild`, not `cargo tauri ios build`.** The archive still builds the
+  Rust staticlib — the target's "Build Rust Code" pre-build phase shells out to
+  `cargo tauri ios xcode-script`, which is why the job installs `tauri-cli` — but
+  driving `xcodebuild` directly is what makes the command-line signing overrides
+  possible. Use `-project` (there is no Pods workspace) and lowercase
+  `-configuration release` (XcodeGen named the configs `debug`/`release`).
+- **Not fastlane, deliberately.** `gym`/`pilot` wrap the same three commands, and
+  `match`'s reason to exist is sharing certs across a team. Adopting it would put
+  a Ruby toolchain into a Rust workspace that has none — no `Gemfile`, no
+  `Fastfile`, CocoaPods never even run — to replace ~40 lines of YAML, and would
+  add an abstraction layer between you and already-cryptic signing errors.
+  Reconsider only if store metadata/screenshots start wanting version control
+  (`deliver`) or testers need scripted management (`pilot`).
+- **Secrets:** `APPLE_TEAM_ID`, `IOS_DIST_CERT_P12` (`base64 -i dist.p12`),
+  `IOS_DIST_CERT_PASSWORD`, `IOS_PROVISION_PROFILE` (`base64 -i
+  *.mobileprovision`), plus `APPLE_API_KEY`/`APPLE_API_ISSUER`/
+  `APPLE_API_KEY_CONTENT` for the upload — **shared with `release.yml`'s macOS
+  notarization**, which works as long as that key has App Manager access. The job
+  checks for the first four up front rather than failing inside `codesign` twenty
+  minutes later. Note these are **iOS-type** credentials: the `APPLE_CERTIFICATE`
+  / `APPLE_SIGNING_IDENTITY` Developer ID secrets used for macOS notarization
+  cannot sign iOS.
+- **The provisioning profile expires after one year.** The symptom is a signing
+  failure in the archive step; the fix is re-downloading it from the developer
+  portal and re-pasting the secret.
+- **Expect an ITMS-91053 email** ("missing API declaration") after the first
+  upload — Rust std and WKWebView touch required-reason APIs. It's a warning for
+  TestFlight but **blocks App Store submission**. The fix is a
+  `PrivacyInfo.xcprivacy` in `gen/apple/cha-gui_iOS/` with the reason codes
+  Apple's email names, then `xcodegen generate` in `gen/apple` and commit the
+  regenerated `project.pbxproj` so it's bundled as a resource. Wait for the email
+  rather than guessing the codes.
 
 ## What to avoid
 
