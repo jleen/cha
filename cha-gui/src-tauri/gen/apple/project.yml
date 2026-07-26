@@ -102,8 +102,21 @@ targets:
       # ~/.cargo/bin, so `cargo` (and `cargo tauri`) aren't found and this phase
       # fails with "Cargo: command not found". Terminal `cargo tauri ios …` works
       # because the shell PATH has it. Add it here so GUI builds work too.
+      #
+      # CHA_PREBUILT_RUST_LIB is the CI escape hatch. `cargo tauri ios
+      # xcode-script` is NOT standalone: it calls read_options(), which reads
+      # $TMPDIR/<identifier>-server-addr and then connects to a WebSocket server
+      # that only exists while `cargo tauri ios dev|build` is running. There is
+      # no flag to skip that. So it works from Xcode on a dev machine (a Tauri
+      # CLI session is alive) and panics under a bare `xcodebuild` on a clean
+      # runner. ios-testflight.yml builds the staticlib itself, drops it at
+      # Externals/arm64/release/libapp.a, and sets this to skip the phase.
       - script: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          if [ -n "${CHA_PREBUILT_RUST_LIB:-}" ]; then
+            echo "note: CHA_PREBUILT_RUST_LIB set; using the prebuilt Externals/${CURRENT_ARCH}/${CONFIGURATION}/libapp.a and skipping cargo tauri ios xcode-script."
+            exit 0
+          fi
           cargo tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false

@@ -890,12 +890,31 @@ Inputs: `upload` (default on; uncheck to stop after the IPA artifact) and
 - `security set-key-partition-list` after the import is load-bearing. Without it
   `codesign` blocks on a GUI keychain prompt nobody can answer and the job hangs
   until it times out.
-- **Raw `xcodebuild`, not `cargo tauri ios build`.** The archive still builds the
-  Rust staticlib — the target's "Build Rust Code" pre-build phase shells out to
-  `cargo tauri ios xcode-script`, which is why the job installs `tauri-cli` — but
-  driving `xcodebuild` directly is what makes the command-line signing overrides
-  possible. Use `-project` (there is no Pods workspace) and lowercase
-  `-configuration release` (XcodeGen named the configs `debug`/`release`).
+- **Raw `xcodebuild`, not `cargo tauri ios build`** — that's what makes the
+  command-line signing overrides possible. Use `-project` (there is no Pods
+  workspace) and lowercase `-configuration release` (XcodeGen named the configs
+  `debug`/`release`).
+- **`cargo tauri ios xcode-script` cannot run on a clean machine, so CI skips
+  it.** The "Build Rust Code" pre-build phase calls that command, and it is *not*
+  standalone: it calls `read_options()`, which reads
+  `$TMPDIR/<identifier>-server-addr` and then connects to a **WebSocket server
+  that only exists while `cargo tauri ios dev|build` is running**. There is no
+  flag to bypass it. On a dev machine it works because a Tauri CLI session is
+  alive; under a bare `xcodebuild` on a fresh runner it panics with *"failed to
+  read missing addr file …-server-addr"*. So the workflow builds the staticlib
+  itself (`cargo build -p cha-gui --lib --release --target aarch64-apple-ios`),
+  copies it to `gen/apple/Externals/arm64/release/libapp.a`, and sets
+  `CHA_PREBUILT_RUST_LIB=1` on the `xcodebuild` line; the script phase checks
+  that and exits 0. **Don't remove the guard from `project.yml`/`project.pbxproj`
+  thinking it's dead code** — it's the only reason a signed CI build is possible.
+  Only arm64 is built: `ARCHS` is `arm64` and `EXCLUDED_ARCHS[sdk=iphoneos*]`
+  drops x86_64.
+- **`gen/apple/assets` must be created before the archive.** It's a folder
+  reference in Copy Bundle Resources, but it's an *empty* directory the Tauri CLI
+  makes and git cannot track one — so a fresh checkout lacks it and the Resources
+  phase fails with "Build input file cannot be found". The workflow `mkdir -p`s
+  it. Same class of problem as the pre-build script: things `tauri ios build`
+  would have arranged, which a bare `xcodebuild` must arrange for itself.
 - **Not fastlane, deliberately.** `gym`/`pilot` wrap the same three commands, and
   `match`'s reason to exist is sharing certs across a team. Adopting it would put
   a Ruby toolchain into a Rust workspace that has none — no `Gemfile`, no

@@ -51,13 +51,35 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The Xcode target's "Build Rust Code" pre-build phase shells out to
-      # `cargo tauri ios xcode-script`, so tauri-cli has to be on PATH before
-      # xcodebuild runs — the archive builds the Rust staticlib, not just the
-      # Objective-C shim.
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install Tauri CLI
-        run: cargo binstall -y 'tauri-cli@^2'
+      # The Xcode target links libapp.a out of Externals/, normally produced by
+      # the "Build Rust Code" pre-build phase. That phase can't run here:
+      # `cargo tauri ios xcode-script` calls read_options(), which connects to a
+      # WebSocket server that only exists while `cargo tauri ios dev|build` is
+      # running, and panics with "failed to read missing addr file
+      # <identifier>-server-addr" otherwise. So build the staticlib ourselves and
+      # skip the phase via CHA_PREBUILT_RUST_LIB (set on the archive below).
+      #
+      # This is the same cross-compile mobile.yml build-checks, just --release
+      # and copied into place. Only arm64 is needed: ARCHS is arm64 and
+      # EXCLUDED_ARCHS[sdk=iphoneos*] drops x86_64.
+      - name: Build Rust staticlib for iOS
+        env:
+          # Match IPHONEOS_DEPLOYMENT_TARGET in project.yml so the staticlib's
+          # minimum OS version agrees with the app binary's.
+          IPHONEOS_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          cargo build -p cha-gui --lib --release --target aarch64-apple-ios
+          LIB=target/aarch64-apple-ios/release/libcha_gui_lib.a
+          [ -f "$LIB" ] || { echo "::error::Expected staticlib at $LIB"; ls -l target/aarch64-apple-ios/release/*.a || true; exit 1; }
+          DEST=cha-gui/src-tauri/gen/apple/Externals/arm64/release
+          mkdir -p "$DEST"
+          cp "$LIB" "$DEST/libapp.a"
+
+          # `assets` is a folder reference in Copy Bundle Resources, but it's an
+          # empty directory that the Tauri CLI creates and git cannot track — so
+          # a fresh checkout is missing it and the Resources phase fails with
+          # "Build input file cannot be found".
+          mkdir -p cha-gui/src-tauri/gen/apple/assets
 
       # Fail loudly and early rather than 20 minutes later inside codesign.
       - name: Check required secrets
@@ -157,7 +179,11 @@ jobs:
       # CODE_SIGN_IDENTITY (to "iPhone Developer") and would outrank
       # Signing.xcconfig. Command-line settings outrank everything, so this
       # needs no edits to the generated project. MARKETING_VERSION and
-      # CURRENT_PROJECT_VERSION land in Info.plist via $(...) references.
+      # CURRENT_PROJECT_VERSION land in Info.plist via $(...) references, and
+      # CHA_PREBUILT_RUST_LIB reaches the pre-build script the same way — Xcode
+      # exports every build setting, user-defined ones included, into run-script
+      # phases. (An env var wouldn't do: script phases are spawned by the
+      # long-lived SWBBuildService daemon, not by this xcodebuild process.)
       #
       # -project, not -workspace: the Podfile was never run, so there is no Pods
       # workspace, and the .xcworkspace in gen/apple only references itself.
@@ -177,6 +203,7 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CHA_PREBUILT_RUST_LIB=1 \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
 
       # Written fresh into RUNNER_TEMP rather than reusing the committed
