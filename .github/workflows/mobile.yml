@@ -112,5 +112,8 @@ jobs:
       # separate: it needs the distribution cert and profile, and coupling it to
       # this workflow would make every Android run depend on Apple secrets.
       # Runs on macOS because the iOS SDK is Xcode-only.
+      # tauri/custom-protocol matches what ios-testflight.yml (and tauri-cli's
+      # build_options) use, so this check compiles the same cfg paths the
+      # shipped app does rather than a configuration nothing releases.
       - name: Build-check (cross-compile lib for iOS)
-        run: cargo build -p cha-gui --lib --target aarch64-apple-ios
+        run: cargo build -p cha-gui --lib --target aarch64-apple-ios --features tauri/custom-protocol

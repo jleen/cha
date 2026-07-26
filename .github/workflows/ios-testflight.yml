@@ -68,7 +68,15 @@ jobs:
           # minimum OS version agrees with the app binary's.
           IPHONEOS_DEPLOYMENT_TARGET: '14.0'
         run: |
-          cargo build -p cha-gui --lib --release --target aarch64-apple-ios
+          # tauri/custom-protocol is NOT optional and NOT cosmetic. tauri-cli's
+          # build_options() pushes it unconditionally for every build (and
+          # filters it out for `dev`, which is why dev builds don't want it).
+          # Without it, generate_context! never registers the asset protocol, so
+          # the shipped app asks for tauri://localhost/, gets nothing, and shows
+          # "did you grant local network permissions? That is required to reach
+          # the development server" — a working build that is useless on device.
+          cargo build -p cha-gui --lib --release --target aarch64-apple-ios \
+            --features tauri/custom-protocol
           LIB=target/aarch64-apple-ios/release/libcha_gui_lib.a
           [ -f "$LIB" ] || { echo "::error::Expected staticlib at $LIB"; ls -l target/aarch64-apple-ios/release/*.a || true; exit 1; }
           DEST=cha-gui/src-tauri/gen/apple/Externals/arm64/release

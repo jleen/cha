@@ -902,13 +902,26 @@ Inputs: `upload` (default on; uncheck to stop after the IPA artifact) and
   flag to bypass it. On a dev machine it works because a Tauri CLI session is
   alive; under a bare `xcodebuild` on a fresh runner it panics with *"failed to
   read missing addr file …-server-addr"*. So the workflow builds the staticlib
-  itself (`cargo build -p cha-gui --lib --release --target aarch64-apple-ios`),
-  copies it to `gen/apple/Externals/arm64/release/libapp.a`, and sets
+  itself (`cargo build -p cha-gui --lib --release --target aarch64-apple-ios
+  --features tauri/custom-protocol`), copies it to
+  `gen/apple/Externals/arm64/release/libapp.a`, and sets
   `CHA_PREBUILT_RUST_LIB=1` on the `xcodebuild` line; the script phase checks
   that and exits 0. **Don't remove the guard from `project.yml`/`project.pbxproj`
   thinking it's dead code** — it's the only reason a signed CI build is possible.
   Only arm64 is built: `ARCHS` is `arm64` and `EXCLUDED_ARCHS[sdk=iphoneos*]`
   drops x86_64.
+- **`--features tauri/custom-protocol` is mandatory on that build.** tauri-cli's
+  `build_options()` pushes it onto *every* build (and `dev_options()` filters it
+  *out*, which is why dev builds don't carry it) — so hand-rolling the cargo
+  invocation means hand-rolling this too. Without it `generate_context!` never
+  registers the asset protocol, and the installed app fails at launch with
+  *"Failed to request tauri://localhost/ … did you grant local network
+  permissions? That is required to reach the development server"*. That message
+  is a red herring: nothing is wrong with the network or the device, the app
+  simply has no embedded assets to serve. **It builds, signs, uploads, and
+  passes review-side processing perfectly — the breakage only appears on a real
+  install**, so there is no CI signal for it. `mobile.yml`'s build-check passes
+  the same feature so it compiles the same cfg paths.
 - **`gen/apple/assets` must be created before the archive.** It's a folder
   reference in Copy Bundle Resources, but it's an *empty* directory the Tauri CLI
   makes and git cannot track one — so a fresh checkout lacks it and the Resources
