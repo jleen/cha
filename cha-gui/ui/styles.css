@@ -5,6 +5,12 @@
   --accent: #4a9eff;
   --border: #333;
   --error: #ff6b6b;
+  /* Height of the on-screen keyboard, but only where it *overlays* the viewport
+     instead of resizing it — iOS, in both WKWebView and Safari. main.js keeps it
+     current from visualViewport; it stays 0px on every other surface, including
+     Android (whose WebView shrinks the viewport itself, leaving nothing to
+     subtract). See the app-frame rule on body. */
+  --keyboard-inset: 0px;
 }
 
 * {
@@ -23,19 +29,46 @@ body {
   /* No rubber-band / pull-to-refresh on the app chrome. Nothing to chain on
      desktop, so this is a mobile-only effect. */
   overscroll-behavior: none;
+  overflow: hidden;
 }
 
 body {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  /* dvh tracks the dynamic viewport as the on-screen keyboard opens/closes; it
-     equals vh in a fixed desktop window, so the vh line above is just the
-     fallback for engines without dvh (iOS < 15.4 / old Android WebView). */
-  height: 100dvh;
+  height: calc(100vh - var(--keyboard-inset));
+  /* dvh tracks the dynamic viewport as browser chrome collapses; it equals vh in
+     a fixed desktop window, so the vh line above is just the fallback for engines
+     without dvh (iOS < 15.4 / old Android WebView). dvh does *not* account for
+     the on-screen keyboard on iOS — that's what --keyboard-inset is for, and
+     subtracting it keeps the last result rows reachable by scrolling #results
+     now that the document scroll they used to rely on is gone. */
+  height: calc(100dvh - var(--keyboard-inset));
   background: var(--bg);
   color: var(--fg);
   font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Only while an overlaying keyboard is actually on screen (main.js sets the
+   class from the same measurement that fills --keyboard-inset). iOS does not
+   shrink the layout viewport for the keyboard: it grows the document's
+   scrollable region by the keyboard's height instead, which is what let the
+   whole app be dragged up and down while typing. Taking the body out of flow
+   leaves the document nothing to scroll — `overflow: hidden` above does not
+   reliably suppress it on its own.
+
+   This is gated rather than unconditional for a rendering reason, not a
+   platform one: a fixed body is composited, and Chromium (so WebView2 and
+   Android's WebView) then drops from subpixel to grayscale text antialiasing.
+   That's a visible change on every glyph in the app, for a fix that only ever
+   matters while a keyboard is overlaying — so the rule applies exactly then and
+   never otherwise. Verified with a pixel diff: with the rule unconditional,
+   nothing moves but ~5k text pixels lose their subpixel fringes; gated, the
+   before/after renders are byte-identical. */
+html.keyboard-open body {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
 }
 
 header {

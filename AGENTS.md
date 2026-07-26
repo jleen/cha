@@ -653,6 +653,47 @@ class, or a CSS rule that is a literal no-op on desktop.
   is `body.web`'s `max-width`, which exists because a browser window is far wider
   than the app's 720px — additive, and invisible to the two app targets. `viewport-fit=cover` on the viewport
   meta is required for the insets to be non-zero and is a desktop no-op.
+- **iOS doesn't shrink the viewport for the on-screen keyboard — it makes the
+  document scrollable instead.** In WKWebView *and* mobile Safari, the layout
+  viewport, `window.innerHeight`, `100vh` and `100dvh` all stay full-screen when
+  the keyboard opens; WebKit grows the document's scrollable region by the
+  keyboard's height so content underneath can still be reached. In an app that
+  exactly fills the viewport that reads as a bug — the whole screen, header and
+  all, could be dragged up and down while typing. **Android is unaffected** (its
+  WebView shrinks the viewport, so `100dvh` shrinks with it and nothing
+  overflows), and desktop has no soft keyboard in the picture. The fix is two
+  halves that must stay together: `trackKeyboardInset()` in
+  [`main.js`](cha-gui/ui/main.js) measures the keyboard and publishes
+  `--keyboard-inset` + an `html.keyboard-open` class;
+  [`styles.css`](cha-gui/ui/styles.css) subtracts the inset from the body's
+  `100dvh` frame (so the last result rows stay reachable by scrolling `#results`
+  — what the document scroll used to provide) and takes the body out of flow
+  (so there is no document scroll left to drag). `overflow: hidden` on its own
+  does not reliably suppress it.
+  - **Measure against `100dvh`, never `window.innerHeight`.** On the web build in
+    mobile Safari `innerHeight` is the *large* viewport — it ignores the
+    browser's own toolbars — so an `innerHeight - visualViewport.height` inset
+    would read a permanently visible URL bar as a permanently open keyboard and
+    leave a dead strip at the bottom of the page. `dvh` already accounts for
+    browser chrome, so what's left after subtracting the visual viewport is the
+    keyboard alone. The code recovers the current `100dvh` value from the body's
+    own box plus the inset it last applied, which is why that inset is kept in a
+    closure variable rather than re-read from the DOM.
+  - **The `position: fixed` half is gated on the keyboard actually being up, and
+    the gate is not decoration.** A fixed body is composited, and Chromium — so
+    WebView2 and Android's WebView — then renders every glyph in the app with
+    grayscale instead of subpixel antialiasing. Unconditional, that changed ~5k
+    text pixels on the desktop render for a fix desktop never needs; gated, the
+    desktop/mobile/web renders are pixel-identical to before. Driving the class
+    off the same measurement that fills the inset keeps this free of platform
+    sniffing — and self-cancelling on Android, where both terms of the
+    measurement drop together so neither the inset nor the class ever lands.
+  - Headless Chromium can't raise a keyboard, so the logic was checked by driving
+    `trackKeyboardInset()` with a stubbed `visualViewport` (keyboard up/down,
+    pinch-zoom, and the mobile-Safari toolbar case) and pixel-diffing all four
+    surfaces against the previous build. **The WebKit half — that a fixed body
+    really does defeat the keyboard's scroll region — is not reproducible off a
+    device**, so re-check it on the Simulator or a phone before trusting it.
 - **`#pattern` must stay ≥16px** (it's 18px). iOS zooms the page when a focused
   `<input>` is under 16px, and the zoom doesn't cleanly undo. This looks like a
   harmless tidy-up and isn't.

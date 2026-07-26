@@ -147,6 +147,51 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeHelp();
 });
 
+// Measure how much of the layout viewport an on-screen keyboard is covering, and
+// publish it as --keyboard-inset plus a .keyboard-open class on <html>. Together
+// those make the app a fixed frame that ends where the keyboard begins (see the
+// body rules in styles.css).
+//
+// This exists because iOS never shrinks the layout viewport for the keyboard:
+// window.innerHeight, 100vh and 100dvh all stay full-screen, and WebKit instead
+// grows the document's scrollable region by the keyboard's height — which is why
+// the app could be dragged around while typing. Taking the body out of flow
+// removes that scroll, and subtracting the inset is what keeps the bottom of
+// #results from being stranded under the keyboard once it can no longer be
+// scrolled into view.
+//
+// The measurement is deliberately platform-agnostic, and self-cancelling wherever
+// the keyboard resizes the viewport instead of overlaying it: Android's WebView
+// shrinks the layout viewport, so both terms drop together and the inset stays 0
+// — no class, no subtraction, nothing to undo. Multiplying by `scale` converts
+// the pinch-zoomed visual viewport back into layout pixels, so zooming alone is
+// never mistaken for a keyboard, and the 1px floor ignores rounding noise.
+function trackKeyboardInset() {
+  const vv = window.visualViewport;
+  if (!vv) return; // pre-2019 engines: no visualViewport, no measurement to make
+  const root = document.documentElement;
+  let inset = 0;
+  const update = () => {
+    // What the frame would be with no keyboard — i.e. what CSS's 100dvh resolves
+    // to right now — recovered from the body's own box plus whatever we last took
+    // off it. Measuring against window.innerHeight instead would be wrong on the
+    // web build in mobile Safari, where innerHeight is the *large* viewport (the
+    // one that ignores the browser's own toolbars): a permanently visible URL bar
+    // would read as a permanently open keyboard. dvh already accounts for browser
+    // chrome, so what's left over after subtracting the visual viewport is the
+    // keyboard and nothing else.
+    const frame = document.body.getBoundingClientRect().height + inset;
+    const covered = frame - vv.height * vv.scale;
+    inset = covered > 1 ? Math.round(covered) : 0;
+    root.style.setProperty("--keyboard-inset", `${inset}px`);
+    root.classList.toggle("keyboard-open", inset > 0);
+  };
+  vv.addEventListener("resize", update);
+  vv.addEventListener("scroll", update); // fires as the keyboard animates in
+  update();
+}
+trackKeyboardInset();
+
 // Decide the platform-specific surface once at startup. `platform` is compiled
 // truth from the backend ("desktop" | "mobile" | "web"), so we never guess from
 // the user agent.
