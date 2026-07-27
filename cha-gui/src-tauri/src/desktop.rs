@@ -210,12 +210,11 @@ pub fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
 /// menu is wired in via `Builder::menu` (not `App::set_menu`) so accelerators
 /// like Ctrl+N register on the initial window's accelerator table on Windows.
 ///
-/// About appears in Help on every desktop platform *and*, on macOS, at the top
-/// of the app menu, where Mac users look for it. Both entries are our own item
-/// (same `"about"` id, so one arm of `on_menu_event` serves both) rather than
-/// `PredefinedMenuItem::about`, which would pop the system's own panel: two
-/// different dialogs both called "About Cha" is worse than one listed twice.
-/// A menu item can only belong to one menu, hence two builds of the same item.
+/// About lives wherever that platform's users look for it: the top of the app
+/// menu on macOS, the Help menu on Windows/Linux, which have no app menu. It is
+/// our own item there rather than `PredefinedMenuItem::about`, which would pop
+/// the system's own panel — About Cha means *our* About window on every desktop
+/// platform, not a system panel on one of them.
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let menu = MenuBuilder::new(app);
 
@@ -272,12 +271,16 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
     let pattern_syntax = MenuItemBuilder::new("Pattern Syntax")
         .id("pattern_syntax")
         .build(app)?;
-    let about = MenuItemBuilder::new("About Cha").id("about").build(app)?;
-    let help_menu = SubmenuBuilder::new(app, "Help")
-        .item(&pattern_syntax)
-        .separator()
-        .item(&about)
-        .build()?;
+    let help = SubmenuBuilder::new(app, "Help").item(&pattern_syntax);
+    // macOS keeps About at the top of the app menu, where Mac users look for it;
+    // a second copy under Help would just be clutter. Windows/Linux have no app
+    // menu, so Help is About's only home there.
+    #[cfg(not(target_os = "macos"))]
+    let help = {
+        let about = MenuItemBuilder::new("About Cha").id("about").build(app)?;
+        help.separator().item(&about)
+    };
+    let help_menu = help.build()?;
 
     menu.item(&file_menu)
         .item(&edit_menu)

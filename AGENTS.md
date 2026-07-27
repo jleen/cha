@@ -443,16 +443,15 @@ and the [`capabilities/`](cha-gui/src-tauri/capabilities/) files:
   clippy`**, the same way the mobile paths are — if you edit the App submenu,
   build on a Mac (or expect CI to be the first thing that tells you).
 
-- **About is our window, not the system panel, and it's listed twice on macOS.**
-  Help → About Cha exists on every desktop platform (Windows/Linux have no app
-  menu to put it in), and on macOS the app menu's first item is *the same custom
-  item* rather than `PredefinedMenuItem::about`. Both carry the id `"about"`, so
-  one `on_menu_event` arm serves both. The alternative — leaving the predefined
-  item in place — gives macOS two different dialogs both called "About Cha", one
-  of them the system panel, which is worse than one entry appearing in two
-  menus. A menu item belongs to exactly one menu, so the two entries are two
-  `MenuItemBuilder` builds sharing an id; muda has no uniqueness check and
-  dispatch is by id string.
+- **About is our window, not the system panel, and it sits where the platform
+  puts it.** On macOS it's the first item of the app menu (replacing
+  `PredefinedMenuItem::about`) and is *not* repeated under Help; on
+  Windows/Linux, which have no app menu, Help is its only home. So the item is
+  built in one of two places behind `#[cfg(target_os = "macos")]` — the same
+  split Quit already uses — and carries the id `"about"` either way, so one
+  `on_menu_event` arm serves it. Using the predefined item on macOS instead
+  would mean "About Cha" opens the system panel there and our window
+  everywhere else.
 
 - **The About window is not modal, and Tauri 2.11 can't make it one.** There is
   no modal API. `WebviewWindowBuilder::parent` is the nearest thing and it isn't
