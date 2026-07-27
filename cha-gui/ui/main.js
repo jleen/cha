@@ -147,23 +147,45 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeHelp();
 });
 
-// Measure how much of the layout viewport an on-screen keyboard is covering, and
-// publish it as --keyboard-inset plus a .keyboard-open class on <html>. Together
-// those make the app a fixed frame that ends where the keyboard begins (see the
-// body rules in styles.css).
+// Cancel the page-level drag iOS offers while the keyboard is up. Preventing
+// touchmove cancels the native pan gesture behind it, which is the one lever CSS
+// doesn't have: the scroll range is a UIScrollView content inset, not a CSS
+// overflow, so no combination of overflow, position or overscroll-behavior
+// reaches it (position:fixed on the body was tried and does nothing here — it
+// only bought a misplaced caret, since WebKit mispositions the caret and
+// selection inside a fixed-position input).
 //
-// This exists because iOS never shrinks the layout viewport for the keyboard:
-// window.innerHeight, 100vh and 100dvh all stay full-screen, and WebKit instead
-// grows the document's scrollable region by the keyboard's height — which is why
-// the app could be dragged around while typing. Taking the body out of flow
-// removes that scroll, and subtracting the inset is what keeps the bottom of
-// #results from being stranded under the keyboard once it can no longer be
-// scrolled into view.
+// Two things are deliberately let through. Touches inside #results scroll the
+// list itself, which is the whole point of shrinking the frame — its
+// overscroll-behavior: contain keeps that from chaining out to the page. And
+// touches on the focused input belong to iOS's own caret-dragging and selection
+// gestures; cancelling those would break dragging the cursor through the field,
+// and while the field has focus such a drag scrolls nothing anyway.
+function blockPageDrag(e) {
+  if (e.target === input) return;
+  if (results.contains(e.target) && results.scrollHeight > results.clientHeight) return;
+  e.preventDefault();
+}
+
+// Measure how much of the frame an on-screen keyboard is covering, publish it as
+// --keyboard-inset (see body in styles.css), and while one is up, stop the page
+// from being dragged around.
+//
+// Two separate iOS behaviors meet here, and the fix needs both halves. First,
+// iOS never shrinks the layout viewport for the keyboard — window.innerHeight,
+// 100vh and 100dvh all stay full-screen — so without the inset the tail of
+// #results sits under the keyboard with nothing to bring it up. Second, WKWebView
+// and mobile Safari give the page's native scroll view a bottom content inset the
+// height of the keyboard, so the page gains that much scroll range even though
+// its content fits exactly; that is what let the whole app, input and all, be
+// dragged up and down while typing. Shrinking the frame is what makes the second
+// half affordable: with nothing stranded under the keyboard, there is no longer
+// any reason to want that drag.
 //
 // The measurement is deliberately platform-agnostic, and self-cancelling wherever
 // the keyboard resizes the viewport instead of overlaying it: Android's WebView
 // shrinks the layout viewport, so both terms drop together and the inset stays 0
-// — no class, no subtraction, nothing to undo. Multiplying by `scale` converts
+// — no subtraction, no listener, nothing to undo. Multiplying by `scale` converts
 // the pinch-zoomed visual viewport back into layout pixels, so zooming alone is
 // never mistaken for a keyboard, and the 1px floor ignores rounding noise.
 function trackKeyboardInset() {
@@ -171,6 +193,7 @@ function trackKeyboardInset() {
   if (!vv) return; // pre-2019 engines: no visualViewport, no measurement to make
   const root = document.documentElement;
   let inset = 0;
+  let open = false;
   const update = () => {
     // What the frame would be with no keyboard — i.e. what CSS's 100dvh resolves
     // to right now — recovered from the body's own box plus whatever we last took
@@ -184,7 +207,23 @@ function trackKeyboardInset() {
     const covered = frame - vv.height * vv.scale;
     inset = covered > 1 ? Math.round(covered) : 0;
     root.style.setProperty("--keyboard-inset", `${inset}px`);
-    root.classList.toggle("keyboard-open", inset > 0);
+
+    // Attach the drag block only while a keyboard is actually up. A non-passive
+    // touchmove listener opts the page out of WebKit's threaded scrolling, so
+    // leaving one attached would tax scrolling #results at every other moment,
+    // for a hazard that only exists during those moments.
+    const nowOpen = inset > 0;
+    if (nowOpen === open) return;
+    open = nowOpen;
+    if (open) {
+      // Put the page back first: WebKit may already have scrolled it while
+      // raising the keyboard, and we are about to remove the user's ability to
+      // scroll it back by hand.
+      window.scrollTo(0, 0);
+      document.addEventListener("touchmove", blockPageDrag, { passive: false });
+    } else {
+      document.removeEventListener("touchmove", blockPageDrag);
+    }
   };
   vv.addEventListener("resize", update);
   vv.addEventListener("scroll", update); // fires as the keyboard animates in
