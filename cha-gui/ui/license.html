@@ -36,7 +36,32 @@
             padding: 6px 0;
             display: inline-block;
         }
+        /* Cha's own notice: ordinary flowing text, left-aligned inside the
+           centered intro. The source keeps the MIT text's original line breaks
+           so a diff shows only the tags changing, but HTML collapses them, so
+           it wraps to the window like any paragraph. */
+        .own-license {
+            text-align: left;
+        }
+        /* Desktop reaches this page through Help > About Cha, in its own
+           window, so the link back to Pattern Syntax (which has its own Help
+           entry and window) is redundant chrome there. The class is set only
+           when the desktop shell passes `?platform=desktop`; mobile and web
+           load this file with no query, keep the link, and need it — the help
+           sheet's iframe navigation is their only route between the pages. */
+        html.desktop .back {
+            display: none;
+        }
     </style>
+    <!-- See desktop.rs: the desktop app opens this page with `?platform=desktop`,
+         and this mirrors that onto <html> for the rule above. Backend-supplied
+         truth passed through the URL, not user-agent sniffing — these pages are
+         static and run no IPC. Inline and in <head> so nothing flashes before it
+         is hidden. -->
+    <script>
+        if (new URLSearchParams(location.search).get("platform") === "desktop")
+            document.documentElement.classList.add("desktop");
+    </script>
 </head>
 
 <body>
@@ -45,17 +70,20 @@
         <div class="intro">
             <h1>Cha</h1>
             <p>Copyright (c) 2026 John Leen</p>
-            <pre>
+            <div class="own-license">
+                <p>
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
-
+                </p>
+                <p>
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
-
+                </p>
+                <p>
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -63,7 +91,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-            </pre>
+                </p>
+            </div>
 
             <h1>Third Party Licenses</h1>
             <p>This page lists the licenses of the projects used in Cha.</p>

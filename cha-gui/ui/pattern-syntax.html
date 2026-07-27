@@ -8,6 +8,16 @@
     />
     <title>Pattern Syntax</title>
     <link rel="stylesheet" href="pattern-syntax.css" />
+    <!-- See desktop.rs: the desktop app opens this page with `?platform=desktop`,
+         and this mirrors that onto <html> so the stylesheet can hide the link to
+         the license page (desktop has Help > About Cha instead). Backend-supplied
+         truth passed through the URL, not user-agent sniffing — this page is
+         static and runs no IPC. Inline and in <head> so the link never flashes
+         before it is hidden. -->
+    <script>
+      if (new URLSearchParams(location.search).get("platform") === "desktop")
+        document.documentElement.classList.add("desktop");
+    </script>
   </head>
   <body>
     <main>

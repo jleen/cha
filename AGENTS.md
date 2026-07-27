@@ -236,15 +236,38 @@ one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
   of truth, but the committed `license.html` is what actually ships, so a change
   to the template must be **mirrored into `license.html` by hand** — the two are
   byte-identical outside the `{{…}}` blocks, and a regeneration will overwrite
-  whatever is there. Everything else about it is an ordinary UI file: it sits in
+  whatever is there. That includes the `<head>`: the page's `<style>`, its inline
+  `?platform=desktop` script, and Cha's own copyright/licence notice all live in
+  the mirrored region, so `diff <(head -100 scripts/about.hbs) <(head -100
+  cha-gui/ui/license.html)` should stay empty. Everything else about it is an ordinary UI file: it sits in
   `cha-gui/ui/` and rides into every build the way `index.html` does (embedded by
   `tauri-codegen` for desktop and mobile, by `include_dir!` for `cha-web`).
-- **The only route to the license page is the footer link at the bottom of
-  [`pattern-syntax.html`](cha-gui/ui/pattern-syntax.html)**, and the license page
-  links back to it. That back link is load-bearing on desktop, where the page
-  replaces the Pattern Syntax *window's* content and there is no Back button,
-  menu item, or gesture to undo the navigation. Mobile and web navigate the help
-  sheet's iframe instead, where Back works but ✕ closes the whole sheet.
+- **How the license page is reached differs by platform, and the cross-links
+  between it and Pattern Syntax exist only where they're the *only* route.** On
+  mobile and web there is no menu bar, so the footer link at the bottom of
+  [`pattern-syntax.html`](cha-gui/ui/pattern-syntax.html) is the only way in and
+  the license page's `←&nbsp;Pattern Syntax` back link is the only way out —
+  both navigate the help sheet's iframe, where Back works but ✕ closes the whole
+  sheet. On desktop each page has its own Help menu entry and its own window
+  (Help → Pattern Syntax, Help → About Cha), so both links are redundant chrome
+  and are hidden there.
+- **Desktop hides them with a class, not a media query, and the class comes from
+  the backend.** `DESKTOP_QUERY` in
+  [`desktop.rs`](cha-gui/src-tauri/src/desktop.rs) appends `?platform=desktop`
+  when the desktop shell opens either page; a two-line inline `<script>` in the
+  `<head>` of each mirrors it onto `<html>`, and one CSS rule per page
+  (`html.desktop .footer`, `html.desktop .back`) does the hiding. Rationale, in
+  case this looks over-thought: a media query can't express it — a *desktop
+  browser* pointed at `cha-web` must still show the links, and no width/pointer
+  query separates that from the desktop app. Sniffing the user agent is
+  forbidden (see `transport.js`), and these two pages are static — no `invoke`,
+  no `transport.js`, no round trip — so the URL is how the backend's compiled
+  truth reaches them. It fails *open*: no query, no class, links visible, which
+  is what every non-desktop surface wants. Tauri strips the query before
+  resolving the asset (`ignore query string and fragment` in
+  `tauri::protocol::tauri`), so the page still loads normally. No preprocessing,
+  no build step, no new file — the whole mechanism is two lines of JS and a
+  display rule in each page.
 - **The word list is embedded via `include_str!` when `words.txt` is present at
   the repo root at build time** (the usual case). `build.rs` gates the embed
   behind a `words_embedded` cfg (it can't be a runtime `if` — `include_str!`
@@ -366,8 +389,9 @@ overlap, it only delays it.
 
 ### Multiple windows and menus (Tauri v2, hard-won on Windows)
 
-The app has File → New Window (open another search window) and Help → Pattern
-Syntax (a singleton static cheat-sheet window). This is **desktop-only** — it all
+The app has File → New Window (open another search window), Help → Pattern Syntax
+(a singleton static cheat-sheet window) and Help → About Cha (a singleton window
+showing `license.html`). This is **desktop-only** — it all
 lives in [`desktop.rs`](cha-gui/src-tauri/src/desktop.rs) behind the
 `#[cfg(desktop)]` module (see the mobile section). Getting it working
 cross-platform surfaced several non-obvious traps — in
@@ -399,7 +423,7 @@ and the [`capabilities/`](cha-gui/src-tauri/capabilities/) files:
 
 - **The capability `windows` list must glob to match runtime windows.** Each new
   window gets a unique label (`main-2…` from Rust, `main-<timestamp>` from JS), so
-  `default.json` scopes to `["main", "main-*", "pattern-syntax"]`. Without the
+  `default.json` scopes to `["main", "main-*", "pattern-syntax", "about"]`. Without the
   glob, a new window's `invoke()` calls are silently blocked. Creating a window
   *from the front end* additionally needs the
   `core:webview:allow-create-webview-window` permission — which lives in a
@@ -414,12 +438,34 @@ and the [`capabilities/`](cha-gui/src-tauri/capabilities/) files:
   `Builder::menu(build_menu)` (which takes `&AppHandle`), **not**
   `App::set_menu` in `setup` — the former registers the accelerator table on the
   initial window at creation. Standard items are `PredefinedMenuItem`s (Tauri
-  owns their labels/localization); only New Window and Pattern Syntax are custom.
+  owns their labels/localization); New Window, Pattern Syntax and About Cha are
+  custom. Note that **this branch is invisible to a Linux/Windows `cargo
+  clippy`**, the same way the mobile paths are — if you edit the App submenu,
+  build on a Mac (or expect CI to be the first thing that tells you).
 
-- **Singleton windows:** re-opening Pattern Syntax focuses the existing window via
-  `get_webview_window("pattern-syntax")` + `set_focus()` instead of stacking
-  duplicates. `AppHandle::clone()` is cheap (an `Arc` bump) — clone freely to move
-  a handle into a `'static` closure.
+- **About is our window, not the system panel, and it's listed twice on macOS.**
+  Help → About Cha exists on every desktop platform (Windows/Linux have no app
+  menu to put it in), and on macOS the app menu's first item is *the same custom
+  item* rather than `PredefinedMenuItem::about`. Both carry the id `"about"`, so
+  one `on_menu_event` arm serves both. The alternative — leaving the predefined
+  item in place — gives macOS two different dialogs both called "About Cha", one
+  of them the system panel, which is worse than one entry appearing in two
+  menus. A menu item belongs to exactly one menu, so the two entries are two
+  `MenuItemBuilder` builds sharing an id; muda has no uniqueness check and
+  dispatch is by id string.
+
+- **The About window is not modal, and Tauri 2.11 can't make it one.** There is
+  no modal API. `WebviewWindowBuilder::parent` is the nearest thing and it isn't
+  modality — it's "owned window" on Windows, `addChildWindow` on macOS,
+  `set_transient_for` on Linux, none of which block input to the opener. It
+  would also be wrong here: About is a singleton shared by every search window,
+  and on Windows an owned window is destroyed with (and hidden alongside) its
+  owner, so it would die with whichever window happened to open it.
+
+- **Singleton windows:** re-opening Pattern Syntax or About focuses the existing
+  window via `get_webview_window("pattern-syntax")` / `("about")` + `set_focus()`
+  instead of stacking duplicates. `AppHandle::clone()` is cheap (an `Arc` bump) —
+  clone freely to move a handle into a `'static` closure.
 
 ## Web (`cha-web`, axum)
 

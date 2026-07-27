@@ -1,9 +1,9 @@
 //! Desktop-only surfaces: the menu bar, additional search windows, the Pattern
-//! Syntax window, and the user's dictionary directory (with the file-manager
-//! shell-out that reveals it). Mobile has none of these — no menu, no
-//! multiwindow, no config dir, no file manager — so the whole lot lives behind
-//! this one `#[cfg(desktop)] mod desktop;` boundary. Nothing here can be dead
-//! code on mobile because the module simply isn't compiled there.
+//! Syntax and About windows, and the user's dictionary directory (with the
+//! file-manager shell-out that reveals it). Mobile has none of these — no menu,
+//! no multiwindow, no config dir, no file manager — so the whole lot lives
+//! behind this one `#[cfg(desktop)] mod desktop;` boundary. Nothing here can be
+//! dead code on mobile because the module simply isn't compiled there.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -120,6 +120,22 @@ fn open_search_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Query appended to the two static help pages when the *desktop* shell opens
+/// them in their own windows. Each page mirrors it onto `<html>` in a two-line
+/// inline script, and its stylesheet then hides the link to the other page:
+/// desktop has a Help menu entry and a real window for each, so the cross-links
+/// are redundant chrome. Mobile and web load the same files with no query, keep
+/// the links, and need them — navigating the help sheet's iframe is their only
+/// route between the two pages.
+///
+/// This is the backend telling the page which shell opened it — the same
+/// compiled truth the `platform` command returns, delivered through the URL
+/// because these pages are static and run no IPC. It is *not* user-agent
+/// sniffing (see the note in `transport.js`). Tauri strips the query before
+/// resolving the asset ("ignore query string and fragment" in
+/// `tauri::protocol::tauri`), so the file itself still loads normally.
+const DESKTOP_QUERY: &str = "?platform=desktop";
+
 /// Open (or focus) the singleton Pattern Syntax cheat-sheet window. The page is
 /// static HTML, so it needs no Tauri commands.
 fn open_pattern_syntax_window(app: &tauri::AppHandle) {
@@ -130,7 +146,7 @@ fn open_pattern_syntax_window(app: &tauri::AppHandle) {
     if let Err(e) = WebviewWindowBuilder::new(
         app,
         "pattern-syntax",
-        WebviewUrl::App("pattern-syntax.html".into()),
+        WebviewUrl::App(format!("pattern-syntax.html{DESKTOP_QUERY}").into()),
     )
     .title("Pattern Syntax")
     .inner_size(560.0, 680.0)
@@ -138,6 +154,37 @@ fn open_pattern_syntax_window(app: &tauri::AppHandle) {
     .build()
     {
         eprintln!("Cha: could not open the Pattern Syntax window: {e}");
+    }
+}
+
+/// Open (or focus) the singleton About window: the generated license page,
+/// which carries Cha's own copyright and license above every dependency's.
+/// Static HTML like Pattern Syntax, so it needs no Tauri commands either.
+///
+/// **Not modal**, deliberately: Tauri 2.11 exposes no modal API at all. The
+/// nearest thing is `WebviewWindowBuilder::parent`, which means "owned window"
+/// on Windows, `addChildWindow` on macOS and `set_transient_for` on Linux —
+/// none of which block input to the opener, so it would buy stacking order, not
+/// modality. It would also pick the wrong semantics for a singleton shared by
+/// every search window: on Windows the About window is destroyed with (and
+/// hidden alongside) whichever window happened to open it. A plain window that
+/// re-focuses instead of stacking duplicates is the behavior we want anyway.
+fn open_about_window(app: &tauri::AppHandle) {
+    if let Some(existing) = app.get_webview_window("about") {
+        let _ = existing.set_focus();
+        return;
+    }
+    if let Err(e) = WebviewWindowBuilder::new(
+        app,
+        "about",
+        WebviewUrl::App(format!("license.html{DESKTOP_QUERY}").into()),
+    )
+    .title("About Cha")
+    .inner_size(640.0, 720.0)
+    .resizable(true)
+    .build()
+    {
+        eprintln!("Cha: could not open the About window: {e}");
     }
 }
 
@@ -149,25 +196,34 @@ pub fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         "new_window" => open_search_window(app),
         "open_dict_dir" => open_dict_dir_impl(app),
         "pattern_syntax" => open_pattern_syntax_window(app),
+        "about" => open_about_window(app),
         _ => {}
     }
 }
 
 /// Build the full standard application menu (App / File / Edit / Window / Help).
 /// Standard items are `PredefinedMenuItem`s that Tauri labels and localizes; the
-/// only custom items are "New Window" and "Pattern Syntax".
+/// only custom items are "New Window", "Pattern Syntax" and "About Cha".
 ///
 /// The macOS "app menu" (About/Services/Hide/Quit) is macOS-only and is omitted
 /// on Windows/Linux, where it isn't idiomatic; there, Quit lives under File. The
 /// menu is wired in via `Builder::menu` (not `App::set_menu`) so accelerators
 /// like Ctrl+N register on the initial window's accelerator table on Windows.
+///
+/// About appears in Help on every desktop platform *and*, on macOS, at the top
+/// of the app menu, where Mac users look for it. Both entries are our own item
+/// (same `"about"` id, so one arm of `on_menu_event` serves both) rather than
+/// `PredefinedMenuItem::about`, which would pop the system's own panel: two
+/// different dialogs both called "About Cha" is worse than one listed twice.
+/// A menu item can only belong to one menu, hence two builds of the same item.
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let menu = MenuBuilder::new(app);
 
     #[cfg(target_os = "macos")]
     let menu = {
+        let about = MenuItemBuilder::new("About Cha").id("about").build(app)?;
         let app_menu = SubmenuBuilder::new(app, "Cha")
-            .about(None)
+            .item(&about)
             .separator()
             .services()
             .separator()
@@ -216,8 +272,11 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
     let pattern_syntax = MenuItemBuilder::new("Pattern Syntax")
         .id("pattern_syntax")
         .build(app)?;
+    let about = MenuItemBuilder::new("About Cha").id("about").build(app)?;
     let help_menu = SubmenuBuilder::new(app, "Help")
         .item(&pattern_syntax)
+        .separator()
+        .item(&about)
         .build()?;
 
     menu.item(&file_menu)

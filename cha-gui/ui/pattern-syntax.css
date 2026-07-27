@@ -121,3 +121,13 @@ a {
   display: inline-block;
   padding: 6px 0;
 }
+
+/* Desktop opens this page from Help > Pattern Syntax and the license page from
+   Help > About Cha, each in its own window, so the link between them is
+   redundant chrome there. The class is set (by the inline script in
+   pattern-syntax.html) only when the desktop shell passes `?platform=desktop`;
+   mobile and web load this file with no query, keep the link, and need it — the
+   help sheet's iframe navigation is their only route to the license page. */
+html.desktop .footer {
+  display: none;
+}
