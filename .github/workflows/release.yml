@@ -16,7 +16,7 @@ jobs:
   verify-version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Read the manifest directly rather than via `cargo metadata`, which would
       # want a toolchain and a registry index just to answer this.
@@ -41,7 +41,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # No setup-qemu-action: deploy/Dockerfile pins its builder stage to
       # BUILDPLATFORM and cross-compiles, so both architectures are built
@@ -103,7 +103,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

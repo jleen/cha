@@ -35,7 +35,7 @@ jobs:
       # words.txt is committed and freely redistributable, so the checkout puts
       # a shippable dictionary at the repo root where build.rs expects it. A
       # build that shipped a placeholder list would be worse than no build.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Pin rather than inherit whatever the runner image happens to ship.
       # Xcode churn on the hosted images is the usual cause of a signing setup
@@ -263,7 +263,7 @@ jobs:
       # for another 20-minute archive. dSYMs go too — TestFlight crash reports
       # from a Rust staticlib are unreadable without them.
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ios-${{ env.VERSION }}-${{ env.BUILD_NUMBER }}
           path: |
