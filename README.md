@@ -12,12 +12,11 @@ standalone crate.
 
 ## Word list
 
-No word list is provided. You’ll need to procure your own word list and provide
-it as a text file, one lowercase word per line.
+A word list is provided, based on the [12dicts](https://wyrdplay.org/12dicts.html) lists. You can also provide your own word list as a text file, one lowercase word per line.
 
-The GUI expects one or more word list files to be located in a designated directory
-(see below).  In addition,
-if you provide `words.txt` at compile time, it will be compiled into the GUI
+The GUI expects user-provided word list files to be located in a designated directory
+(see below).  If you’re building your own binaries,
+you can also just replace `words.txt` with your preferred list; it will be compiled into the GUI
 application and bundled with it, to be used in addition to any
 user-provided word lists.
 
