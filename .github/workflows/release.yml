@@ -82,8 +82,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  release:
+  # Create the draft release exactly once, before the matrix fans out.
+  #
+  # Every matrix job used to pass `tagName` to tauri-action, which makes each
+  # one look for a draft with that tag and create it when it doesn't find one.
+  # Three jobs finishing within seconds of each other race on that lookup: on
+  # v0.6.2 two of them each created a draft ("Couldn't find release with tag
+  # v0.6.2. Creating one." in both logs) and the assets landed split across the
+  # two. Earlier tags only ever produced one release because the builds
+  # happened to finish far enough apart, not because anything prevented it.
+  #
+  # Creating the release here and handing the id down means the matrix can only
+  # ever upload. Don't "simplify" this back into `tagName` on the matrix step.
+  create-release:
     needs: verify-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      # Plain `gh api` rather than actions/github-script, which is what Tauri's
+      # own docs reach for: github-script@v7 still runs on Node 20, and pulling
+      # it in would reintroduce the deprecation warning the rest of this file
+      # was just cleaned up to avoid. `gh` is preinstalled on the runner and
+      # this matches how verify-version above is written.
+      - name: Create the draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+            -f tag_name="${GITHUB_REF_NAME}" \
+            -f name="Cha ${GITHUB_REF_NAME}" \
+            -f body='See the assets to download this version and install.' \
+            -F draft=true -F prerelease=false --jq .id)
+          echo "Created draft release $id for ${GITHUB_REF_NAME}."
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: [verify-version, create-release]
     permissions:
       contents: write
     strategy:
@@ -132,10 +170,9 @@ jobs:
           APPLE_API_KEY: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_API_KEY || '' }}
           APPLE_API_KEY_PATH: ${{ matrix.platform == 'macos-latest' && '/tmp/apple_api_key.p8' || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Cha ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download this version and install.'
-          releaseDraft: true
-          prerelease: false
+          # Upload into the draft create-release made; with releaseId set,
+          # tauri-action never takes its create-or-find path. The release stays
+          # a draft because that is how it was created.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           projectPath: cha-gui/src-tauri
           args: ${{ matrix.args }}
