@@ -1,0 +1,73 @@
+# cha-web behind a reverse proxy that is ITSELF a container.
+#
+#   docker compose -f deploy/docker-compose.shared-network.yml --project-directory deploy up -d
+#
+# Use this when you already run Caddy/nginx/Traefik in Docker. The other file,
+# docker-compose.yml, publishes cha-web on the host's loopback, which a
+# containerized proxy can never reach: `127.0.0.1` inside the proxy's container
+# is the proxy's own network namespace, not the host. The symptom is a 502 with
+# "dial tcp 127.0.0.1:8080: connect: connection refused" — the proxy is fine,
+# it's looking in the wrong place.
+#
+# Here cha-web joins the proxy's existing network and is addressed by name.
+#
+# 1. Find the network your proxy is on:
+#
+#      docker inspect <proxy-container> \
+#        --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}'
+#
+# 2. Point this file at it, in deploy/.env or the environment:
+#
+#      echo 'CHA_PROXY_NETWORK=your_network_name' >> deploy/.env
+#
+# 3. In your existing Caddyfile, address cha-web by service name — NOT 127.0.0.1:
+#
+#      cha.example.com {
+#          reverse_proxy cha-web:8080
+#      }
+#
+#    Docker's embedded DNS resolves `cha-web` on any user-defined network the
+#    service has joined. Then reload the proxy (`docker exec <proxy> caddy reload
+#    --config /etc/caddy/Caddyfile`, or restart it).
+
+services:
+  cha-web:
+    image: ghcr.io/jleen/cha-web:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+
+    # Note there is deliberately NO `ports:` here. The proxy reaches cha-web over
+    # the shared Docker network, so nothing needs to be published on the host —
+    # which also means cha-web cannot be reached except through the proxy. That's
+    # a real security gain over the host-proxy layout, where anything on the box
+    # can hit port 8080 directly and bypass whatever auth the proxy enforces.
+    networks:
+      - proxy
+
+    volumes:
+      - ./dictionaries:/dictionaries:ro
+
+    environment:
+      CHA_DICT_DIR: /dictionaries
+      # Uncomment and match your CPU limit below if you change it.
+      # CHA_MAX_CONCURRENT: "4"
+      RUST_LOG: "cha_web=info,tower_http=warn"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  proxy:
+    # Created and owned by the proxy's own compose project; we only attach.
+    external: true
+    name: ${CHA_PROXY_NETWORK:?set CHA_PROXY_NETWORK to your proxy network name - see the header of this file}
