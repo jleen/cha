@@ -4,6 +4,18 @@ use std::collections::HashMap;
 
 const PUNCTUATION: &[char] = &[' ', '-', '\''];
 
+/// Byte-wise `PUNCTUATION` test, for the detection scan that runs on every word.
+///
+/// All three marks are ASCII, so scanning bytes is equivalent to scanning chars
+/// but skips UTF-8 decoding and the linear walk over `PUNCTUATION` — and this
+/// runs once per character of every word in the list, before any matching, so
+/// it is squarely in the hot path. The *stripping* path below still works in
+/// chars: it is correctness-critical for non-ASCII input and rarely taken.
+#[inline]
+fn is_punct_byte(b: u8) -> bool {
+    matches!(b, b' ' | b'-' | b'\'')
+}
+
 /// A compiled matcher. Returns `None` when the word does not match, or
 /// `Some(MatchInfo)` when it does — the `MatchInfo` carries optional extra detail
 /// about the match (e.g. unused pool letters) and is empty for matches that have
@@ -150,7 +162,7 @@ pub fn compile_pattern_checked_with(
     let matcher: Matcher = Box::new(move |word: &str| {
         let test_word: Cow<str> = if has_punct {
             Cow::Borrowed(word)
-        } else if word.chars().any(|c| PUNCTUATION.contains(&c)) {
+        } else if word.as_bytes().iter().any(|&b| is_punct_byte(b)) {
             Cow::Owned(word.chars().filter(|c| !PUNCTUATION.contains(c)).collect())
         } else {
             Cow::Borrowed(word)
@@ -267,7 +279,7 @@ fn compile_template(template: &str, limits: &CompileLimits) -> Result<Matcher, P
             return compile_fuzzy_template(base, k, limits);
         }
     }
-    let regex_str = template_to_regex(base)?;
+    let (regex_str, fixed_len) = template_to_regex(base)?;
     // `template_to_regex` maps every `*` to `[a-z]*`, so a star-heavy template
     // like `**********cat` costs the engine work superlinear in the star count,
     // *per word*, across the whole list. Cap the backtracking rather than let a
@@ -279,6 +291,21 @@ fn compile_template(template: &str, limits: &CompileLimits) -> Result<Matcher, P
         .build()
         .map_err(|e| PatternError(format!("Invalid template '{}': {}", base, e)))?;
     Ok(Box::new(move |word: &str| {
+        // Reject on length before invoking the regex engine. A star-free template
+        // matches exactly one length, and on a large list the overwhelming
+        // majority of words are the wrong length — so this replaces a
+        // backtracking match with an integer compare for most of the scan. It is
+        // a pure filter: any word this rejects could not have matched anyway.
+        if let Some(n) = fixed_len {
+            // Byte length is a safe lower bound on character count, since a UTF-8
+            // char is at least one byte — so a word shorter than `n` bytes can
+            // never match. The exact test is only valid when the word is
+            // all-ASCII, where bytes and chars coincide; anything else falls
+            // through and lets the regex decide.
+            if word.len() < n || (word.len() != n && word.is_ascii()) {
+                return None;
+            }
+        }
         if re.is_match(word).unwrap_or(false) {
             Some(MatchInfo::default())
         } else {
@@ -461,18 +488,49 @@ fn escape_in_char_class(c: char) -> String {
     }
 }
 
-fn template_to_regex(template: &str) -> Result<String, PatternError> {
+/// Translate a template to a regex, and report the exact length it can match.
+///
+/// Every construct except `*` consumes exactly one character, so a star-free
+/// template matches words of exactly one length — which lets the caller reject
+/// most of the word list with an integer compare instead of the regex engine.
+/// `None` means the length is not fixed (the template contains a `*`, or a
+/// literal whose lowercasing changes its character count, which would make the
+/// count unreliable).
+fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternError> {
     let mut out = String::new();
+    let mut fixed_len: Option<usize> = Some(0);
     let mut seen_vars: HashMap<char, bool> = HashMap::new();
     let chars: Vec<char> = template.chars().collect();
     let mut i = 0;
 
+    // Count one input character for this position, unless the length has already
+    // been marked unknowable.
+    macro_rules! consume_one {
+        () => {
+            if let Some(n) = fixed_len {
+                fixed_len = Some(n + 1);
+            }
+        };
+    }
+
     while i < chars.len() {
         match chars[i] {
-            '.' => out.push_str("[a-z]"),
-            '*' => out.push_str("[a-z]*"),
-            '@' => out.push_str("[aeiou]"),
-            '#' => out.push_str("[bcdfghjklmnpqrstvwxyz]"),
+            '.' => {
+                out.push_str("[a-z]");
+                consume_one!();
+            }
+            '*' => {
+                out.push_str("[a-z]*");
+                fixed_len = None; // the only variable-width construct
+            }
+            '@' => {
+                out.push_str("[aeiou]");
+                consume_one!();
+            }
+            '#' => {
+                out.push_str("[bcdfghjklmnpqrstvwxyz]");
+                consume_one!();
+            }
             '[' => {
                 let rel = chars[i..]
                     .iter()
@@ -484,9 +542,11 @@ fn template_to_regex(template: &str) -> Result<String, PatternError> {
                     out.push_str(&escape_in_char_class(ch));
                 }
                 out.push(']');
+                consume_one!();
                 i = j;
             }
             c if c.is_ascii_digit() => {
+                consume_one!();
                 let name = format!("v{}", c);
                 if let std::collections::hash_map::Entry::Vacant(e) = seen_vars.entry(c) {
                     e.insert(true);
@@ -498,9 +558,20 @@ fn template_to_regex(template: &str) -> Result<String, PatternError> {
             c @ ('-' | '\'' | ' ') => {
                 out.push('\\');
                 out.push(c);
+                consume_one!();
             }
             c if c.is_alphabetic() => {
-                out.push_str(&fancy_regex::escape(&c.to_lowercase().to_string()));
+                let lowered = c.to_lowercase().to_string();
+                // Almost always one char, but a few characters lengthen when
+                // lowercased (İ -> i̇), so the position would match more than one
+                // input character. Rare enough not to be worth modelling; just
+                // give up on the fast path rather than compute a wrong length.
+                if lowered.chars().count() == 1 {
+                    consume_one!();
+                } else {
+                    fixed_len = None;
+                }
+                out.push_str(&fancy_regex::escape(&lowered));
             }
             c => {
                 return Err(PatternError(format!(
@@ -511,7 +582,7 @@ fn template_to_regex(template: &str) -> Result<String, PatternError> {
         }
         i += 1;
     }
-    Ok(out)
+    Ok((out, fixed_len))
 }
 
 fn count_chars(chars: &[char]) -> [usize; 26] {
