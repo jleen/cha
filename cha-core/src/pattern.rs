@@ -285,6 +285,33 @@ fn is_vowel(b: u8) -> bool {
     matches!(b, b'a' | b'e' | b'i' | b'o' | b'u')
 }
 
+/// Advance `i` past any `*` immediately following the one just consumed.
+///
+/// `*` means "zero or more letters", so a run of them accepts exactly what a
+/// single `*` accepts — `[a-z]*[a-z]*` is `[a-z]*`, and the fuzzy matcher's
+/// `Star` arm consumes no fuzz budget, so stacking them adds nothing there
+/// either. So this changes no behavior — except where a star run was previously
+/// expensive enough to exhaust a match-time limit, which degraded the word to
+/// "no match" and *lost real matches*. Both engines pay for redundant stars in
+/// branching, per candidate word, and the effect was severe: before collapsing,
+/// `**********1**********1` took 24.7 s per scan and returned 9_778 of its
+/// 25_193 matches, the rest silently truncated by `backtrack_limit`; it now
+/// costs 139 ms and returns all of them, being exactly `*1*1`. On the fuzzy
+/// side `` **********cat`1 `` went from 7.9 s to 8.7 ms as `` *cat`1 ``.
+///
+/// This attacks the cause. The limits stay as the backstop for the shapes that
+/// have nothing to collapse — alternating stars with distinct backreferences,
+/// like `*1*2*1*2*`.
+///
+/// Called from the `*` arm of a scan over `chars`, so it only ever sees stars
+/// that the caller has already recognized as top-level — a `*` inside a `[...]`
+/// class is consumed by the `[` arm and never reaches here.
+fn skip_redundant_stars(chars: &[char], i: &mut usize) {
+    while chars.get(*i + 1) == Some(&'*') {
+        *i += 1;
+    }
+}
+
 /// Tokenize a template for fuzzy matching. Rejects digit variables (whose
 /// backreference semantics don't compose cleanly with a mismatch budget).
 fn tokenize_fuzzy(template: &str) -> Result<Vec<FuzzTok>, PatternError> {
@@ -294,7 +321,10 @@ fn tokenize_fuzzy(template: &str) -> Result<Vec<FuzzTok>, PatternError> {
     while i < chars.len() {
         match chars[i] {
             '.' => out.push(FuzzTok::Any),
-            '*' => out.push(FuzzTok::Star),
+            '*' => {
+                out.push(FuzzTok::Star);
+                skip_redundant_stars(&chars, &mut i);
+            }
             '@' => out.push(FuzzTok::Vowel),
             '#' => out.push(FuzzTok::Consonant),
             '[' => {
@@ -487,6 +517,7 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
             '*' => {
                 out.push_str("[a-z]*");
                 fixed_len = None; // the only variable-width construct
+                skip_redundant_stars(&chars, &mut i);
             }
             '@' => {
                 out.push_str("[aeiou]");
@@ -1562,6 +1593,91 @@ mod tests {
         assert!(m("abcd").is_some());
         assert!(m("aXbXcXdX").is_some());
         assert!(m("unpredictability").is_some());
+    }
+
+    // --- Consecutive stars collapse -----------------------------------------
+    //
+    // `*` is "zero or more letters", so a run of them accepts exactly what one
+    // accepts. Collapsing is a pure performance change on the regex and fuzzy
+    // paths (the anagram path already folds stars into a `has_star` bool), and
+    // the cases below pin both halves: same language, and the shapes that used
+    // to be pathological now aren't.
+
+    #[test]
+    fn test_star_runs_accept_the_same_language() {
+        for (many, one) in [
+            ("**cat", "*cat"),
+            ("***cat", "*cat"),
+            ("**a**e**", "*a*e*"),
+            ("c**t", "c*t"),
+            ("****", "*"),
+            ("cat**", "cat*"),
+        ] {
+            let m = compile_pattern(many).unwrap();
+            let o = compile_pattern(one).unwrap();
+            for w in ["cat", "ct", "concat", "scatter", "a", "", "acute", "cate"] {
+                assert_eq!(
+                    m(w).is_some(),
+                    o(w).is_some(),
+                    "{many} and {one} disagree on {w:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_star_runs_collapse_on_the_fuzzy_path_too() {
+        let m = compile_pattern("**cat`1").unwrap();
+        let o = compile_pattern("*cat`1").unwrap();
+        for w in ["cat", "bat", "concat", "wombat", "ct", "cart"] {
+            assert_eq!(m(w).is_some(), o(w).is_some(), "disagreement on {w:?}");
+        }
+    }
+
+    #[test]
+    fn test_star_inside_a_character_class_is_not_a_star() {
+        // The `[` arm consumes to `]`, so a `*` in there is a class member and
+        // must never reach the collapsing helper. `[a*b]` matches one literal
+        // asterisk-or-a-or-b; no word has an asterisk, so it behaves as `[ab]`.
+        let m = compile_pattern("c[a*b]t").unwrap();
+        assert!(m("cat").is_some());
+        assert!(m("cbt").is_some());
+        assert!(m("cot").is_none());
+        // And it must not have been treated as a variable-width construct.
+        assert!(m("coat").is_none());
+    }
+
+    #[test]
+    fn test_collapsing_rescues_a_previously_budget_bound_pattern() {
+        // `**********1**********1` exceeded `backtrack_limit` on many words and
+        // degraded them to "no match" — silently returning a fraction of the
+        // real matches. Collapsed to `*1*1` it is bounded, so the two spellings
+        // must now agree everywhere, including on long words.
+        let many = compile_pattern(&format!("{}1{}1", "*".repeat(10), "*".repeat(10))).unwrap();
+        let one = compile_pattern("*1*1").unwrap();
+        for w in [
+            "banana",
+            "kayak",
+            "cat",
+            "unpredictability",
+            "antidisestablishmentarianism",
+        ] {
+            assert_eq!(
+                many(w).is_some(),
+                one(w).is_some(),
+                "star run and collapsed form disagree on {w:?}"
+            );
+        }
+        assert!(one("banana").is_some(), "sanity: `*1*1` matches banana");
+    }
+
+    #[test]
+    fn test_star_run_collapse_preserves_variable_length() {
+        // Collapsing must not let the fixed-length early-out switch on: a star,
+        // however many times written, still makes the length variable.
+        let m = compile_pattern("**cat**`1").unwrap();
+        assert!(m("cat").is_some());
+        assert!(m("concatenate").is_some());
     }
 
     #[test]

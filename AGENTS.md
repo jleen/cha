@@ -206,10 +206,12 @@ fields, which is cheaper than making every caller build a nested struct.
   alone are therefore *not* the hazard — measured, `**********cat` and
   `*a*e*i*o*` both run correctly with `backtrack_limit` set to **1**, at the same
   ~22 ns/word as everything else on that path. Backreferences are what reach the
-  backtracking VM, and stars *combined* with them are what go exponential:
-  `*1*2*1*2*` needs ~1_315 steps, and `**********1**********1` consumes whatever
-  it is given (~109 s per scan at 100_000, still finding new matches). Cite that
-  second shape, not a star-only one, when explaining why this limit exists.
+  backtracking VM, and stars *combined* with them are what go exponential — but
+  only stars that survive collapsing (see below), i.e. alternating stars with
+  *distinct* backreferences: `*1*2*1*2*` needs ~1_315 steps, and
+  `*1*2*3*4*1*2*3*4*` is still budget-bound at the default (~3 s per scan, 566
+  matches at 20_000 vs 579 at 200_000). Cite that shape, not a star-only one,
+  when explaining why this limit exists.
 - **`max_fuzzy_steps` — match-time, per word.** Bounds `fuzzy_match`, the
   hand-rolled backtracker on the fuzzy path. Note its `budget` parameter is the
   *fuzz allowance*, a different quantity — don't overload it. Depth was never the
@@ -239,7 +241,22 @@ adversarial worst case. They were **1_000_000 apiece**, which bounded nothing
 useful: `` **********cat`1 `` took **66 s** for one scan under that ceiling while
 finding all of its real matches within 57 steps. Cost is linear in the limit, so
 lowering it was nearly free in correctness and worth ~8x in time. Re-run
-`limitcal` before changing either number.
+`limitcal` before changing either number — note the floors are set by
+`*1*2*1*2*` and `` *a*b*c*d*`2 ``, neither of which has adjacent stars, so star
+collapsing did not move them.
+
+**Consecutive stars are collapsed, and that is the real fix for star-heavy
+patterns.** `*` is "zero or more letters", so `**` accepts exactly what `*`
+accepts — `[a-z]*[a-z]*` is `[a-z]*`, and the fuzzy `Star` arm consumes no fuzz
+budget. Both template paths call `skip_redundant_stars` from their `*` arm; the
+anagram path already folds stars into a `has_star` bool. Do this *at the parsed
+level, never by string-rewriting the raw pattern* — a `*` inside a `[...]` class
+is a class member, and `c[a*b]t` must keep matching exactly three characters.
+The payoff dwarfs the limit tuning: `` **********cat`1 `` went 7.9 s → **8.7 ms**,
+and `**********1**********1` went 24.7 s → **139 ms** *and stopped silently
+losing matches* (9_778 → 25_193), because it no longer blows the per-word budget.
+A limit that truncates is a correctness bug; removing the redundant work is
+strictly better than raising the ceiling.
 
 Exceeding a *match-time* limit degrades to "no match" (via the existing
 `unwrap_or(false)` and the `steps == 0` early return), which is what keeps the
