@@ -68,13 +68,14 @@ pub struct Limits {
     /// `*a*e*i*o*` both run correctly with `backtrack_limit` set to **1**.
     ///
     /// Backreferences are what actually reach the backtracking VM, and stars
-    /// combined with them are what make it exponential. Runs of adjacent stars
-    /// no longer contribute — `compile_template` collapses them — so what is
-    /// left is alternating stars with *distinct* backreferences, which have
-    /// nothing to collapse: `*1*2*1*2*` needs ~1_315 steps, and
-    /// `*1*2*3*4*1*2*3*4*` is still budget-bound at the default (566 matches at
-    /// 20_000, 579 at 200_000, ~3 s per scan either way). That shape, not a
-    /// star-only one, is the case this limit exists for.
+    /// combined with them are what make it exponential. Runs of `.`/`*` no
+    /// longer contribute — `compile_template` normalizes them, see
+    /// `collapse_gap_run` — so what is left is alternating stars separated by
+    /// *distinct backreferences*, which genuinely break the run:
+    /// `*1*2*1*2*` needs ~1_315 steps, and `*1*2*3*4*1*2*3*4*` is still
+    /// budget-bound at the default (566 matches at 20_000, 579 at 200_000, ~3 s
+    /// per scan either way). That shape, not a star-only one, is the case this
+    /// limit exists for.
     pub backtrack_limit: usize,
 
     /// Maximum `fuzzy_match` nodes explored **per word**.

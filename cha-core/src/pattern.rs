@@ -285,31 +285,50 @@ fn is_vowel(b: u8) -> bool {
     matches!(b, b'a' | b'e' | b'i' | b'o' | b'u')
 }
 
-/// Advance `i` past any `*` immediately following the one just consumed.
+/// Consume the run of `.`/`*` following the `*` the caller just matched, and
+/// report how many `.` it contained.
 ///
-/// `*` means "zero or more letters", so a run of them accepts exactly what a
-/// single `*` accepts — `[a-z]*[a-z]*` is `[a-z]*`, and the fuzzy matcher's
-/// `Star` arm consumes no fuzz budget, so stacking them adds nothing there
-/// either. So this changes no behavior — except where a star run was previously
-/// expensive enough to exhaust a match-time limit, which degraded the word to
-/// "no match" and *lost real matches*. Both engines pay for redundant stars in
-/// branching, per candidate word, and the effect was severe: before collapsing,
-/// `**********1**********1` took 24.7 s per scan and returned 9_778 of its
-/// 25_193 matches, the rest silently truncated by `backtrack_limit`; it now
-/// costs 139 ms and returns all of them, being exactly `*1*1`. On the fuzzy
-/// side `` **********cat`1 `` went from 7.9 s to 8.7 ms as `` *cat`1 ``.
+/// A maximal run of `.` and `*` containing k dots and at least one star accepts
+/// exactly the words of length >= k, *whatever the interleaving*: each `.`
+/// contributes exactly one letter, each `*` contributes zero or more, and one
+/// star can absorb any surplus. So the whole run normalizes to `.`xk followed by
+/// a single `*`, which the caller emits. Both symbols are letter-only on both
+/// paths (`.` is `[a-z]` / `FuzzTok::Any`, `*` is `[a-z]*` / `FuzzTok::Star`),
+/// and neither consumes fuzz budget, so the rewrite is exact rather than
+/// approximate. `**` collapsing is just the k = 0 case.
+///
+/// This changes no behavior — except where a run was expensive enough to exhaust
+/// a match-time limit, which degraded the word to "no match" and *lost real
+/// matches*. Both engines pay for a redundant gap symbol in branching, per
+/// candidate word, and the effect was severe. Before this:
+///
+/// - `**********1**********1` took 24.7 s per scan and returned 9_778 of its
+///   25_193 matches, the rest silently truncated by `backtrack_limit`. As
+///   `*1*1` it costs 139 ms and returns all of them.
+/// - `` **********cat`1 `` took 7.9 s; as `` *cat`1 `` it takes 8.7 ms.
+/// - `` *.*.*.*.*.*.*.*.*.*cat`1 `` took 686 ms; as `` .........*cat`1 `` it
+///   takes 2.3 ms. Handling `.` and not just `*` is what closes this one — a
+///   star-only collapse is trivially defeated by sprinkling dots between the
+///   stars, which is why the two symbols have to normalize together.
 ///
 /// This attacks the cause. The limits stay as the backstop for the shapes that
-/// have nothing to collapse — alternating stars with distinct backreferences,
-/// like `*1*2*1*2*`.
+/// have nothing to normalize — alternating stars with distinct backreferences,
+/// like `*1*2*1*2*`, where the digits break the run for real.
 ///
-/// Called from the `*` arm of a scan over `chars`, so it only ever sees stars
-/// that the caller has already recognized as top-level — a `*` inside a `[...]`
-/// class is consumed by the `[` arm and never reaches here.
-fn skip_redundant_stars(chars: &[char], i: &mut usize) {
-    while chars.get(*i + 1) == Some(&'*') {
+/// Called from the `*` arm of a scan over `chars`, so it only ever sees symbols
+/// the caller has already recognized as top-level — a `*` or `.` inside a
+/// `[...]` class is consumed by the `[` arm and never reaches here.
+fn collapse_gap_run(chars: &[char], i: &mut usize) -> usize {
+    let mut dots = 0;
+    while let Some(&c) = chars.get(*i + 1) {
+        match c {
+            '*' => {}
+            '.' => dots += 1,
+            _ => break,
+        }
         *i += 1;
     }
+    dots
 }
 
 /// Tokenize a template for fuzzy matching. Rejects digit variables (whose
@@ -322,8 +341,12 @@ fn tokenize_fuzzy(template: &str) -> Result<Vec<FuzzTok>, PatternError> {
         match chars[i] {
             '.' => out.push(FuzzTok::Any),
             '*' => {
+                // The run normalizes to its dots followed by one star; see
+                // `collapse_gap_run`. Emitting the dots first is the whole
+                // rewrite — they commute with the star.
+                let dots = collapse_gap_run(&chars, &mut i);
+                out.extend(std::iter::repeat_with(|| FuzzTok::Any).take(dots));
                 out.push(FuzzTok::Star);
-                skip_redundant_stars(&chars, &mut i);
             }
             '@' => out.push(FuzzTok::Vowel),
             '#' => out.push(FuzzTok::Consonant),
@@ -515,9 +538,15 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
                 consume_one!();
             }
             '*' => {
+                // The run normalizes to its dots followed by one star; see
+                // `collapse_gap_run`. No `consume_one!` for those dots: the star
+                // has already made the length unknowable.
+                let dots = collapse_gap_run(&chars, &mut i);
+                for _ in 0..dots {
+                    out.push_str("[a-z]");
+                }
                 out.push_str("[a-z]*");
                 fixed_len = None; // the only variable-width construct
-                skip_redundant_stars(&chars, &mut i);
             }
             '@' => {
                 out.push_str("[aeiou]");
@@ -1678,6 +1707,102 @@ mod tests {
         let m = compile_pattern("**cat**`1").unwrap();
         assert!(m("cat").is_some());
         assert!(m("concatenate").is_some());
+    }
+
+    /// Words spanning the lengths a short gap run can discriminate, plus some
+    /// that exercise a literal tail.
+    const GAP_PROBE_WORDS: &[&str] = &[
+        "",
+        "a",
+        "ab",
+        "abc",
+        "abcd",
+        "abcde",
+        "abcdef",
+        "abcdefg",
+        "cat",
+        "acat",
+        "aacat",
+        "aaacat",
+        "aaaacat",
+        "aaaaacat",
+        "aaaaaacat",
+        "bat",
+        "aabat",
+        "concat",
+    ];
+
+    #[test]
+    fn test_every_gap_run_normalizes_exactly() {
+        // A maximal run of `.`/`*` with k dots and at least one star accepts
+        // exactly the words of length >= k, whatever the interleaving — so it
+        // must behave identically to `.`xk followed by one `*`. Enumerate every
+        // such run up to length 5 (2^5 interleavings each) against both a bare
+        // and a literal-tailed form, on both the regex and the fuzzy path.
+        for len in 1..=5usize {
+            for bits in 0..(1u32 << len) {
+                let run: String = (0..len)
+                    .map(|b| if (bits >> b) & 1 == 1 { '.' } else { '*' })
+                    .collect();
+                if !run.contains('*') {
+                    continue; // a dots-only run is already its own normal form
+                }
+                let dots = run.chars().filter(|&c| c == '.').count();
+                let normalized = format!("{}*", ".".repeat(dots));
+                for tail in ["", "cat", "cat`1"] {
+                    let a = compile_pattern(&format!("{run}{tail}")).unwrap();
+                    let b = compile_pattern(&format!("{normalized}{tail}")).unwrap();
+                    for w in GAP_PROBE_WORDS {
+                        assert_eq!(
+                            a(w).is_some(),
+                            b(w).is_some(),
+                            "{run}{tail} and {normalized}{tail} disagree on {w:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_gap_run_normalization_respects_the_minimum_length() {
+        // The rewrite must not lose the dots' length floor: `*.*.*` requires two
+        // letters, and is not the same as `*`.
+        let m = compile_pattern("*.*.*").unwrap();
+        assert!(m("ab").is_some());
+        assert!(m("abc").is_some());
+        assert!(m("a").is_none());
+        assert!(m("").is_none());
+    }
+
+    #[test]
+    fn test_gap_symbols_inside_a_character_class_are_literals() {
+        // Neither symbol may reach the collapser from inside `[...]`; both are
+        // ordinary class members there, so the position stays exactly one char.
+        let m = compile_pattern("c[a.b]t").unwrap();
+        assert!(m("cat").is_some());
+        assert!(m("cbt").is_some());
+        assert!(m("cot").is_none());
+        assert!(m("coat").is_none(), "class must not become variable-width");
+    }
+
+    #[test]
+    fn test_dot_star_runs_are_normalized_on_the_fuzzy_path() {
+        // The star-only collapse is trivially defeated by putting dots between
+        // the stars; this is the case that closes. `*.*.*.*.*cat`1` cost 280 ms
+        // per scan of the full list before, and 5.3 ms as `....*cat`1`.
+        let many = compile_pattern("*.*.*.*.*cat`1").unwrap();
+        let one = compile_pattern("....*cat`1").unwrap();
+        for w in [
+            "aaaacat",
+            "aaaabat",
+            "cat",
+            "aaacat",
+            "unpredictability",
+            "aaaaaaaaaacat",
+        ] {
+            assert_eq!(many(w).is_some(), one(w).is_some(), "disagreement on {w:?}");
+        }
     }
 
     #[test]

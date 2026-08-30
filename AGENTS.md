@@ -242,21 +242,41 @@ useful: `` **********cat`1 `` took **66 s** for one scan under that ceiling whil
 finding all of its real matches within 57 steps. Cost is linear in the limit, so
 lowering it was nearly free in correctness and worth ~8x in time. Re-run
 `limitcal` before changing either number — note the floors are set by
-`*1*2*1*2*` and `` *a*b*c*d*`2 ``, neither of which has adjacent stars, so star
-collapsing did not move them.
+`*1*2*1*2*` and `` *a*b*c*d*`2 ``, whose digits break the gap runs for real, so
+the normalization below did not move them.
 
-**Consecutive stars are collapsed, and that is the real fix for star-heavy
-patterns.** `*` is "zero or more letters", so `**` accepts exactly what `*`
-accepts — `[a-z]*[a-z]*` is `[a-z]*`, and the fuzzy `Star` arm consumes no fuzz
-budget. Both template paths call `skip_redundant_stars` from their `*` arm; the
-anagram path already folds stars into a `has_star` bool. Do this *at the parsed
-level, never by string-rewriting the raw pattern* — a `*` inside a `[...]` class
-is a class member, and `c[a*b]t` must keep matching exactly three characters.
-The payoff dwarfs the limit tuning: `` **********cat`1 `` went 7.9 s → **8.7 ms**,
-and `**********1**********1` went 24.7 s → **139 ms** *and stopped silently
-losing matches* (9_778 → 25_193), because it no longer blows the per-word budget.
-A limit that truncates is a correctness bug; removing the redundant work is
-strictly better than raising the ceiling.
+**Runs of `.` and `*` are normalized, and that is the real fix for star-heavy
+patterns.** A maximal run of gap symbols with k dots and at least one star
+accepts exactly the words of length >= k, *whatever the interleaving* — each `.`
+contributes one letter, each `*` zero or more, and one star absorbs the surplus.
+So the run rewrites to `.`xk then a single `*`. Both symbols are letter-only on
+both paths (`[a-z]`/`FuzzTok::Any` and `[a-z]*`/`FuzzTok::Star`) and neither
+consumes fuzz budget, so the rewrite is exact. Both template paths call
+`collapse_gap_run` from their `*` arm; the anagram path already folds `.` into a
+count and `*` into a `has_star` bool, so it is order-independent already.
+
+Two things to preserve here. **Do it at the parsed level, never by
+string-rewriting the raw pattern** — a `*` or `.` inside a `[...]` class is a
+class member, and `c[a.b]t` must keep matching exactly three characters. And
+**handle `.` alongside `*`, not just `**`**: a star-only collapse is trivially
+defeated by sprinkling dots between the stars, which is exactly how a user
+rebuilds the pathological shape by accident.
+
+The payoff dwarfs the limit tuning:
+
+| pattern | before | after |
+|---|---|---|
+| `` **********cat`1 `` | 7.9 s | 8.7 ms |
+| `**********1**********1` | 24.7 s, 9_778 matches | 139 ms, 25_193 matches |
+| `` *.*.*.*.*.*.*.*.*.*cat`1 `` | 686 ms | 3.4 ms |
+| `*.*.*1*.*.*1` | 2.9 s, 14_333 matches | 78 ms, 14_386 matches |
+
+Note the match counts: those patterns were exceeding a per-word limit and
+degrading the over-budget words to "no match", silently returning a fraction of
+the real result. **A limit that truncates is a correctness bug**, so removing the
+redundant work is strictly better than raising the ceiling. `test_every_gap_run_
+normalizes_exactly` brute-forces every interleaving up to length 5 against the
+normalized form; keep it if you touch this.
 
 Exceeding a *match-time* limit degrades to "no match" (via the existing
 `unwrap_or(false)` and the `steps == 0` early return), which is what keeps the
