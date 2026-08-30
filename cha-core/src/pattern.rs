@@ -345,7 +345,9 @@ fn tokenize_fuzzy(template: &str) -> Result<Vec<FuzzTok>, PatternError> {
                 // `collapse_gap_run`. Emitting the dots first is the whole
                 // rewrite — they commute with the star.
                 let dots = collapse_gap_run(&chars, &mut i);
-                out.extend(std::iter::repeat_with(|| FuzzTok::Any).take(dots));
+                for _ in 0..dots {
+                    out.push(FuzzTok::Any);
+                }
                 out.push(FuzzTok::Star);
             }
             '@' => out.push(FuzzTok::Vowel),
