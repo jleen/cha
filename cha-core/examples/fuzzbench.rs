@@ -4,8 +4,9 @@
 //! With no patterns, runs a default set. Reports the best of `reps + 1` runs.
 
 use cha_core::dictionary::NamedWordList;
-use cha_core::search::{search, SearchLimits};
-use std::time::Instant;
+use cha_core::limits::Limits;
+use cha_core::search::search;
+use std::time::{Duration, Instant};
 
 const DEFAULT_PATTERNS: &[&str] = &[
     "cathode`1",
@@ -26,9 +27,8 @@ fn main() {
     let reps: usize = args
         .first()
         .and_then(|s| s.parse().ok())
-        .map(|n| {
+        .inspect(|_| {
             args.remove(0);
-            n
         })
         .unwrap_or(5);
     let pats: Vec<String> = if args.is_empty() {
@@ -45,7 +45,30 @@ fn main() {
     }];
     eprintln!("{} words, best of {}", n, reps + 1);
 
-    let limits = SearchLimits::interactive();
+    // Both match-time limits are overridable, so a sweep can price the worst
+    // case a candidate default would allow.
+    let env = |k: &str, d: usize| -> usize {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let backtrack = env("CHA_BENCH_BACKTRACK", 1_000_000);
+    let fuzzy = env("CHA_BENCH_FUZZY", 1_000_000) as u32;
+    // A deadline far enough out that it never fires, so what gets measured is
+    // the cost of *having* one rather than the cost of tripping it.
+    let deadline = env("CHA_BENCH_DEADLINE", 0) == 1;
+    let max_results = env("CHA_BENCH_MAX_RESULTS", 5_000);
+    eprintln!(
+        "backtrack_limit={backtrack} max_fuzzy_steps={fuzzy} deadline={deadline} max_results={max_results}"
+    );
+    let limits = Limits {
+        backtrack_limit: backtrack,
+        max_fuzzy_steps: fuzzy,
+        max_results,
+        deadline: deadline.then(|| Instant::now() + Duration::from_secs(3600)),
+        ..Limits::interactive()
+    };
     let mut grand = 0.0f64;
     for pat in &pats {
         let mut best = f64::MAX;

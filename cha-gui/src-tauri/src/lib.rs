@@ -5,6 +5,7 @@
 //! only on desktop.
 
 use cha_core::dictionary;
+use cha_core::limits::Limits;
 use cha_core::search;
 use tauri::Manager;
 
@@ -46,8 +47,7 @@ struct Dict {
 // there and so can't drift between the two transports.
 #[tauri::command(async)]
 fn search(pattern: String, dict: tauri::State<Dict>) -> Result<search::SearchResult, String> {
-    search::search(&dict.lists, &pattern, &search::SearchLimits::interactive())
-        .map_err(|e| e.to_string())
+    search::search(&dict.lists, &pattern, &Limits::interactive()).map_err(|e| e.to_string())
 }
 
 /// Returns a user-facing message when no word list could be loaded, else `None`.

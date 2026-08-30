@@ -101,6 +101,27 @@ instantaneous on a modern laptop. Current release-build baselines:
 | Template (e.g. `qu...`) | < 10 ms | ~5 ms |
 | Anagram (e.g. `;..oting`) | < 20 ms | ~8 ms |
 
+Two extra harnesses live in [`cha-core/examples/`](cha-core/examples/) and are
+built only by `cargo test`/`--examples`, never by a plain `cargo build`, so they
+cost the shipped crate nothing: [`fuzzbench`](cha-core/examples/fuzzbench.rs)
+times a full scan per pattern in ns/word (both match-time limits overridable via
+`CHA_BENCH_*` env vars, for pricing a candidate default), and
+[`limitcal`](cha-core/examples/limitcal.rs) derives the smallest limit each
+pattern actually needs. Both read `words.txt` from the working directory.
+
+**Both template paths reject on length first.** A star-free template matches
+exactly one length, and on a large list the overwhelming majority of words are
+the wrong length — so an integer compare replaces the match for most of the scan.
+The regex path compares against `template_to_regex`'s `fixed_len`, and must keep
+its `is_ascii` guard (byte length only bounds char count from below). The fuzzy
+path compares against `toks.len()` and needs **no** such guard, and the reason is
+worth preserving: `fuzzy_match` is byte-indexed, every token but `Star` consumes
+exactly one byte, and `tokenize_fuzzy` rejects non-ASCII templates — so a word
+carrying a multi-byte char cannot match at any length. Fuzz does not widen this
+either; the budget lets a position *mismatch*, never disappear. Measured, the
+early-out takes a star-free fuzzy scan from ~18 to ~12 ns/word. Any change here
+must stay a *pure filter*: nothing it drops could have matched.
+
 The benchmark flags (`cha <pattern> -w <wordlist> -b <N>`) are the primary way to
 measure regressions. Run with `-b 1000` to get stable averages, e.g.
 `cha ';..oting' -w words.txt -b 1000`. Always compare against a baseline you
@@ -148,14 +169,25 @@ the per-word hot path must stay panic- and `Result`-free. The CLI handles the
 `Err` (interactive mode re-prompts instead of crashing); the GUI maps it to a
 string shown in the UI.
 
-## Every backtracking path needs a bound (`CompileLimits`)
+## Every backtracking path needs a bound (`Limits`)
 
 Pattern input is untrusted — even from a local user, a plausible-looking pattern
 could hang or OOM the app. There are **three** superlinear paths in `pattern.rs`,
-all now bounded by `CompileLimits`, whose `Default` is generous enough that no
-hand-typed pattern reaches it. `compile_pattern`/`compile_pattern_checked` use
-the defaults; `compile_pattern_with`/`compile_pattern_checked_with` take explicit
-limits, which is how a server passes tighter ones.
+all bounded by [`Limits`](cha-core/src/limits.rs), whose `Default` is generous
+enough that no hand-typed pattern reaches it. `compile_pattern`/
+`compile_pattern_checked` use the defaults; `compile_pattern_with`/
+`compile_pattern_checked_with` take explicit limits, which is how a server passes
+tighter ones.
+
+**One struct, split by phase — not by module.** `Limits` lives in its own module
+and carries all six ceilings, including the two the *scan* consults
+(`max_results`, `deadline`). It was previously two nested structs, `CompileLimits`
+inside `SearchLimits`, which implied a compile/scan split that the fields do not
+actually follow: `backtrack_limit` and `max_fuzzy_steps` sat in `CompileLimits`
+but bind **per candidate word**. The distinction that matters to a caller is
+*when a limit binds*, and that cuts across both modules, so the doc comments —
+not the type — carry it. `compile_pattern_checked_with` ignores the two scan-time
+fields, which is cheaper than making every caller build a nested struct.
 
 - **`max_anagram_combos` — the dangerous one, and the only one that binds at
   *compile* time.** `compile_anagram` calls `cartesian_product`, which
@@ -167,13 +199,47 @@ limits, which is how a server passes tighter ones.
   where it is, before the product is built. Use `checked_mul`: the product
   overflows `usize` at around 28 five-way groups, and a wrapped value would slip
   under the cap.
-- **`backtrack_limit`** bounds `fancy-regex` on the non-fuzzy template path,
-  where `template_to_regex` turns every `*` into `[a-z]*`.
-- **`max_fuzzy_steps`** bounds `fuzzy_match`, the hand-rolled backtracker on the
-  fuzzy path. Note its existing `budget` parameter is the *fuzz allowance*, a
-  different quantity — don't overload it. The doc comment there reasons correctly
-  about recursion *depth*, but depth was never the exposure; the `Star` arm
-  branches twice per node, and nothing bounded the node count.
+- **`backtrack_limit` — match-time, per word.** Bounds `fancy-regex` on the
+  non-fuzzy template path. It binds far more narrowly than it looks: a template
+  with **no digit variables** compiles to something `fancy-regex` hands straight
+  to the linear `regex` crate (`RegexImpl::Wrap`), which never backtracks. Stars
+  alone are therefore *not* the hazard — measured, `**********cat` and
+  `*a*e*i*o*` both run correctly with `backtrack_limit` set to **1**, at the same
+  ~22 ns/word as everything else on that path. Backreferences are what reach the
+  backtracking VM, and stars *combined* with them are what go exponential:
+  `*1*2*1*2*` needs ~1_315 steps, and `**********1**********1` consumes whatever
+  it is given (~109 s per scan at 100_000, still finding new matches). Cite that
+  second shape, not a star-only one, when explaining why this limit exists.
+- **`max_fuzzy_steps` — match-time, per word.** Bounds `fuzzy_match`, the
+  hand-rolled backtracker on the fuzzy path. Note its `budget` parameter is the
+  *fuzz allowance*, a different quantity — don't overload it. Depth was never the
+  exposure either; the `Star` arm branches twice per node, and it is the node
+  count that was unbounded.
+- **`max_results` and `deadline` — scan-time, and both effectively free.**
+  `max_results` is one integer compare per *match* (not per word), on a path
+  already allocating a `MatchRow`; it removes work rather than adding it.
+  `deadline` is checked once per `DEADLINE_CHECK_INTERVAL` (4096) words, and
+  measured against the cheapest possible scan (~12 ns/word) a never-firing
+  deadline is indistinguishable from `None`. Do **not** move it per-word.
+
+**Enforcing the match-time limits costs nothing measurable.** `backtrack_limit`
+only picks the threshold `fancy-regex` compares against — it increments its
+counter either way. `max_fuzzy_steps` was A/B'd against a build with the counter
+deleted outright ([`fuzzbench`](cha-core/examples/fuzzbench.rs)); the counted
+build came out a wash or slightly *faster* across every pattern and every round,
+the difference being codegen noise. Don't "optimize" either one away.
+
+**The match-time defaults are calibrated, not guessed.**
+[`limitcal`](cha-core/examples/limitcal.rs) binary-searches, per pattern, the
+smallest limit that still returns every match an unlimited one finds (both limits
+are monotone, so this is well-defined). Realistic patterns need very little — the
+worst are `*1*1` at 193 steps and `` *a*e*`1 `` at 396 — and a deliberately
+adversarial tier tops out at 1_315 and 3_698. The defaults are ~15x that
+adversarial worst case. They were **1_000_000 apiece**, which bounded nothing
+useful: `` **********cat`1 `` took **66 s** for one scan under that ceiling while
+finding all of its real matches within 57 steps. Cost is linear in the limit, so
+lowering it was nearly free in correctness and worth ~8x in time. Re-run
+`limitcal` before changing either number.
 
 Exceeding a *match-time* limit degrades to "no match" (via the existing
 `unwrap_or(false)` and the `steps == 0` early return), which is what keeps the
@@ -508,11 +574,11 @@ look at every number here.
 | Guard | Value | Where |
 |---|---|---|
 | Body size | 8 KB | `DefaultBodyLimit` on the `/api` router |
-| Pattern length | 64 | `CompileLimits`, via `web_limits()` |
-| Anagram combos | 4096 | `CompileLimits` — see the `CompileLimits` section |
-| Regex backtracking | 10_000 | `CompileLimits` |
-| Fuzzy steps | 10_000 | `CompileLimits` |
-| Scan deadline | 2 s | `SearchLimits::deadline`, per 4096-word chunk |
+| Pattern length | 64 | `Limits`, via `web_limits()` |
+| Anagram combos | 4096 | `Limits` — see the `Limits` section |
+| Regex backtracking | 10_000 | `Limits`, per candidate word |
+| Fuzzy steps | 10_000 | `Limits`, per candidate word |
+| Scan deadline | 2 s | `Limits::deadline`, per 4096-word chunk |
 | Concurrency | CPU count | `Semaphore::try_acquire_owned` → 503 |
 | CSP | `'self'` | `SetResponseHeaderLayer` |
 
@@ -1011,9 +1077,9 @@ Inputs: `upload` (default on; uncheck to stop after the IPA artifact) and
 - Do not replace `[usize; 26]` with `HashMap` in the character-counting code.
   The HashMap version was ~6× slower on anagram queries.
 - Do not add a backtracking or combinatorial path to `pattern.rs` without a
-  ceiling in `CompileLimits`, and do not call `cartesian_product` without
-  checking the product size first. See the `CompileLimits` section — every such
-  path is reachable from untrusted input by a short pattern.
+  ceiling in `Limits`, and do not call `cartesian_product` without checking the
+  product size first. See the `Limits` section — every such path is reachable
+  from untrusted input by a short pattern.
 - `fancy_regex` is required (not the plain `regex` crate) because digit
   variables (`1234321`) compile to named capture groups with backreferences,
   which a pure DFA cannot handle.

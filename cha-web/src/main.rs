@@ -30,8 +30,8 @@ use clap::Parser;
 use tokio::sync::Semaphore;
 
 use cha_core::dictionary::{self, NamedWordList, WordListBuilder};
-use cha_core::pattern::CompileLimits;
-use cha_core::search::{self, SearchLimits, SearchResult};
+use cha_core::limits::Limits;
+use cha_core::search::{self, SearchResult};
 
 /// The word list, embedded when `words.txt` is at the repo root at build time.
 /// See build.rs — the decision can't be a runtime `if`.
@@ -59,17 +59,22 @@ const SEARCH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Largest request body accepted. A search request is a few dozen bytes.
 const MAX_BODY_BYTES: usize = 8 * 1024;
 
-/// The work ceilings for one request. Much tighter than `CompileLimits::default()`,
+/// The work ceilings for one request. Tighter than `Limits::interactive()`,
 /// which is tuned for a local user who can close a slow window; here a slow
 /// request occupies a worker that everyone else is waiting on.
-fn web_limits() -> SearchLimits {
-    SearchLimits {
-        compile: CompileLimits {
-            max_pattern_len: MAX_PATTERN_LEN,
-            max_anagram_combos: 4_096,
-            backtrack_limit: 10_000,
-            max_fuzzy_steps: 10_000,
-        },
+fn web_limits() -> Limits {
+    Limits {
+        max_pattern_len: MAX_PATTERN_LEN,
+        max_anagram_combos: 4_096,
+        // Both of these are *match-time* limits, re-armed per candidate word.
+        // They sit ~3-8x above the worst adversarial pattern
+        // `cha-core/examples/limitcal.rs` measures (1_315 backtrack steps,
+        // 3_698 fuzzy steps) — less headroom than the interactive defaults
+        // take, deliberately: the deadline below is the real backstop here, and
+        // a lost match on a hostile pattern matters less than a worker held
+        // hostage.
+        backtrack_limit: 10_000,
+        max_fuzzy_steps: 10_000,
         max_results: WEB_MAX_RESULTS,
         deadline: None, // set per request; see `search`
     }
@@ -148,7 +153,7 @@ fn commas(n: usize) -> String {
 /// a timeout without saying by how much it was missed. The verdict at the end
 /// compares the measured mean against the deadline the server would apply.
 fn run_bench(lists: &[NamedWordList], pattern: &str, iterations: u32) -> ! {
-    let limits = SearchLimits {
+    let limits = Limits {
         deadline: None,
         ..web_limits()
     };
@@ -166,7 +171,7 @@ fn run_bench(lists: &[NamedWordList], pattern: &str, iterations: u32) -> ! {
     println!("  pattern       {pattern}");
     println!(
         "  limits        max_results={} backtrack={} fuzzy={} (no deadline while timing)",
-        limits.max_results, limits.compile.backtrack_limit, limits.compile.max_fuzzy_steps
+        limits.max_results, limits.backtrack_limit, limits.max_fuzzy_steps
     );
 
     // One unmeasured pass: the first scan faults in the whole word list and
@@ -301,7 +306,7 @@ async fn search(
         ));
     };
 
-    let limits = SearchLimits {
+    let limits = Limits {
         deadline: Some(Instant::now() + SEARCH_TIMEOUT),
         ..web_limits()
     };

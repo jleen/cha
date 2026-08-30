@@ -6,15 +6,17 @@
 //! the wire types have exactly one definition, so a change can't drift between
 //! the two transports.
 //!
-//! Everything a caller might want to bound lives in [`SearchLimits`], because
-//! the two callers want very different values: a desktop app is protecting a
-//! DOM from too many rows, while a server is protecting a network from too many
-//! bytes and its own CPU from a slow scan.
+//! Everything a caller might want to bound lives in [`Limits`], because the two
+//! callers want very different values: a desktop app is protecting a DOM from
+//! too many rows, while a server is protecting a network from too many bytes and
+//! its own CPU from a slow scan. That struct spans both phases — see its docs for
+//! which of its fields bind at compile time and which bind per candidate word.
 
 use std::time::Instant;
 
 use crate::dictionary::NamedWordList;
-use crate::pattern::{self, CompileLimits, PatternError};
+use crate::limits::Limits;
+use crate::pattern::{self, PatternError};
 
 /// One matching word, plus the anagram detail described in `MatchInfo`.
 #[derive(Debug)]
@@ -53,43 +55,12 @@ pub struct SearchResult {
     pub note: Option<String>,
 }
 
-/// How much work one search may cost. See [`CompileLimits`] for the compile-time
-/// half; this adds the two bounds that only apply once a matcher exists.
-pub struct SearchLimits {
-    pub compile: CompileLimits,
-    /// Maximum rows materialized across *all* groups combined. `total` is still
-    /// counted past this, so truncation is reported rather than hidden.
-    pub max_results: usize,
-    /// When set, the scan gives up past this instant. Checked between chunks,
-    /// never per word — see the note in [`search`].
-    pub deadline: Option<Instant>,
-}
-
-impl SearchLimits {
-    /// A local app: the cap protects the DOM from a pattern like `*` matching
-    /// the whole list. There is no deadline — a local user who types something
-    /// slow can wait for it, or close the window.
-    pub fn interactive() -> Self {
-        Self {
-            compile: CompileLimits::default(),
-            max_results: 5_000,
-            deadline: None,
-        }
-    }
-}
-
-impl Default for SearchLimits {
-    fn default() -> Self {
-        Self::interactive()
-    }
-}
-
 /// Why a search could not complete.
 #[derive(Debug)]
 pub enum SearchError {
     /// The pattern itself was rejected — a syntax error, or a work limit.
     Pattern(PatternError),
-    /// The scan ran past `SearchLimits::deadline`.
+    /// The scan ran past `Limits::deadline`.
     Timeout,
 }
 
@@ -126,7 +97,7 @@ const DEADLINE_CHECK_INTERVAL: usize = 4096;
 pub fn search(
     lists: &[NamedWordList],
     pattern: &str,
-    limits: &SearchLimits,
+    limits: &Limits,
 ) -> Result<SearchResult, SearchError> {
     let pattern = pattern.trim();
     let list_count = lists.len();
@@ -139,7 +110,7 @@ pub fn search(
         });
     }
 
-    let compiled = pattern::compile_pattern_checked_with(pattern, &limits.compile)?;
+    let compiled = pattern::compile_pattern_checked_with(pattern, limits)?;
 
     // A contentless pattern's matcher matches nothing, so the scan below is a
     // no-op; the note carries through for the front end to display gently.
@@ -201,7 +172,7 @@ mod tests {
 
     #[test]
     fn groups_matches_by_source_list() {
-        let r = search(&lists(), "c.t", &SearchLimits::default()).unwrap();
+        let r = search(&lists(), "c.t", &Limits::default()).unwrap();
         assert_eq!(r.total, 3);
         assert_eq!(r.list_count, 2);
         assert_eq!(r.groups.len(), 2);
@@ -213,14 +184,14 @@ mod tests {
 
     #[test]
     fn lists_without_matches_get_no_group() {
-        let r = search(&lists(), "dog", &SearchLimits::default()).unwrap();
+        let r = search(&lists(), "dog", &Limits::default()).unwrap();
         assert_eq!(r.groups.len(), 1);
         assert_eq!(r.groups[0].list, "First");
     }
 
     #[test]
     fn empty_pattern_is_empty_result_not_an_error() {
-        let r = search(&lists(), "   ", &SearchLimits::default()).unwrap();
+        let r = search(&lists(), "   ", &Limits::default()).unwrap();
         assert_eq!(r.total, 0);
         assert!(r.groups.is_empty());
         // list_count is still reported, so the front end's header logic works.
@@ -229,9 +200,9 @@ mod tests {
 
     #[test]
     fn max_results_caps_rows_across_all_groups_but_not_total() {
-        let limits = SearchLimits {
+        let limits = Limits {
             max_results: 2,
-            ..SearchLimits::default()
+            ..Limits::default()
         };
         let r = search(&lists(), "*", &limits).unwrap();
         let shown: usize = r.groups.iter().map(|g| g.matches.len()).sum();
@@ -241,34 +212,31 @@ mod tests {
 
     #[test]
     fn contentless_pattern_carries_a_note_and_no_rows() {
-        let r = search(&lists(), ";", &SearchLimits::default()).unwrap();
+        let r = search(&lists(), ";", &Limits::default()).unwrap();
         assert!(r.note.is_some());
         assert!(r.groups.is_empty());
     }
 
     #[test]
     fn syntax_error_is_a_pattern_error() {
-        let e = search(&lists(), "c[at", &SearchLimits::default()).unwrap_err();
+        let e = search(&lists(), "c[at", &Limits::default()).unwrap_err();
         assert!(matches!(e, SearchError::Pattern(_)));
     }
 
     #[test]
     fn compile_limits_are_honored() {
-        let limits = SearchLimits {
-            compile: CompileLimits {
-                max_pattern_len: 4,
-                ..CompileLimits::default()
-            },
-            ..SearchLimits::default()
+        let limits = Limits {
+            max_pattern_len: 4,
+            ..Limits::default()
         };
         assert!(search(&lists(), "abcdefgh", &limits).is_err());
     }
 
     #[test]
     fn expired_deadline_reports_timeout() {
-        let limits = SearchLimits {
+        let limits = Limits {
             deadline: Some(Instant::now() - std::time::Duration::from_secs(1)),
-            ..SearchLimits::default()
+            ..Limits::default()
         };
         assert!(matches!(
             search(&lists(), "*", &limits).unwrap_err(),
