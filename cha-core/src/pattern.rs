@@ -833,7 +833,9 @@ fn compile_anagram(
                 // The candidate has to use all the pool letters (a longer word)
                 // or it has to use *only* pool letters (a shorter word).
                 // Wildcards license a deviation from either criterion.
-                if extra_count > num_wildcards && unused_count > num_wildcards {
+                // Wildcards consume pattern symbols without actually adding license,
+                // until all wildcards are consumed, at which point they license non-pool letters.
+                if extra_count > num_wildcards && unused_count > num_wildcards.saturating_sub(candidate_len) {
                     continue;
                 }
 
