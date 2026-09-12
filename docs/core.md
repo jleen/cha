@@ -115,7 +115,23 @@ Two calibrations inside it, both measured rather than guessed:
   halves the spread versus best of 6; best of 16 does not improve on it.
 
 Post-calibration, an unchanged build reproduces within **~0.9% mean, ~3% worst
-case**, against a signal threshold of ~5%.
+case** within a single pair of runs, against a signal threshold of ~5%.
+
+**Across** runs it is looser than that, and the in-process probe cannot see it.
+Measured over six comparisons of identical code, the worst per-pattern delta was
+usually 4–5% but reached 9.7% once, and the pattern that drifted differed every
+time — separate processes get different memory layouts and cache states, so
+cross-run variance genuinely exceeds within-run variance. Raising the threshold
+past 10% would have cost real sensitivity on the sub-millisecond patterns, where a
+genuine regression is also only a few percent.
+
+So `--compare` **re-measures whatever it flags** and reports only what reproduces
+in direction and magnitude. Transient jitter does not survive a second look; a
+real change does. This costs almost nothing because only a handful of patterns are
+ever flagged, and it is what makes the verdict trustworthy: six identical-code
+comparisons now come back clean six times (one raised a candidate, correctly
+dismissed as jitter), while removing the length early-out still confirms all six
+star-free template patterns as regressions.
 
 ### The length early-out
 

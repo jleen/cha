@@ -175,7 +175,8 @@ default:
 ```
 
 It covers every matching path, diffs match counts as well as times, and judges
-deltas against a noise floor it measures. Exit 2 is a timing regression, 3 is
+deltas against a noise floor it measures — re-timing anything it flags, so a
+reported regression is one that reproduced. Exit 2 is a timing regression, 3 is
 moved match counts — **a changed match count outranks any timing delta**, because
 a word that exceeds a per-word limit degrades to "no match" and truncation reads
 as a speedup. The run takes ~20 s, so it is **not** a per-commit gate; skip it for

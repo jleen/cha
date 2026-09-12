@@ -21,12 +21,14 @@
 //! here is a correctness regression wearing a costume, so `--compare` treats a
 //! changed match count as the headline and a timing delta as the detail.
 //!
-//! **It measures its own noise floor instead of guessing at the machine.** A
-//! short probe runs one cheap pattern repeatedly and reports the spread, which is
-//! what decides whether a `--compare` delta is signal. Sniffing for a slow
-//! environment does not work: a WSL2 box exposes no cpufreq governor and no
+//! **It measures its own noise floor instead of guessing at the machine, then
+//! re-measures anything it flags.** A short probe runs one cheap pattern
+//! repeatedly and reports the spread, which sets the threshold a `--compare`
+//! delta has to clear; whatever clears it is then timed a second time, and only a
+//! delta that reproduces is called a result. Sniffing for a slow environment does
+//! not work instead of this: a WSL2 box exposes no cpufreq governor and no
 //! container marker whether it is a quiet 28-core desktop or not. The banner
-//! reports what it can; the probe decides.
+//! reports what it can; the probe and the re-measurement decide.
 //!
 //! Both match-time limits are overridable via `CHA_BENCH_*` for pricing a
 //! candidate `Limits` default, but they default to the shipped values so a plain
@@ -438,6 +440,20 @@ fn ms(d: Duration) -> f64 {
 /// caches, and would otherwise read as a slow outlier. That pass also sizes the
 /// amortization factor, so every sample takes about `TARGET_SAMPLE` regardless of
 /// how cheap the pattern is.
+/// The word lists, limits and repeat count every measurement shares. Bundled so
+/// the confirmation pass in `report_comparison` can re-time a pattern.
+struct Harness<'a> {
+    lists: &'a [NamedWordList],
+    limits: &'a Limits,
+    reps: usize,
+}
+
+impl Harness<'_> {
+    fn measure(&self, pattern: &str) -> (Duration, Duration, usize) {
+        measure(self.lists, pattern, self.limits, self.reps)
+    }
+}
+
 fn measure(
     lists: &[NamedWordList],
     pattern: &str,
@@ -495,12 +511,12 @@ fn inner_count(one: Duration) -> u32 {
 /// inconclusive. So the probe repeats the whole best-of-N measurement
 /// `NOISE_PROBE_GROUPS` times and reports the spread of *those* results, which is
 /// the quantity a verdict needs.
-fn noise_probe(lists: &[NamedWordList], limits: &Limits, reps: usize) -> f64 {
+fn noise_probe(h: &Harness) -> f64 {
     let mut bests = Vec::with_capacity(NOISE_PROBE_GROUPS);
     for _ in 0..NOISE_PROBE_GROUPS {
         // Same code path as a corpus entry, so the spread it reports is the
         // spread of the statistic `--compare` actually diffs.
-        let (best, ..) = measure(lists, NOISE_PROBE, limits, reps);
+        let (best, ..) = h.measure(NOISE_PROBE);
         bests.push(best);
     }
     bests.sort();
@@ -747,7 +763,12 @@ fn main() {
     }
     println!("  reps         best and median of {}", cfg.reps + 1);
 
-    let noise_pct = noise_probe(&lists, &limits, cfg.reps);
+    let h = Harness {
+        lists: &lists,
+        limits: &limits,
+        reps: cfg.reps,
+    };
+    let noise_pct = noise_probe(&h);
     let noise = Noise::classify(noise_pct);
     println!(
         "  noise probe  +/-{:.1}%  {}  ({})",
@@ -774,7 +795,7 @@ fn main() {
             }
             last_tier = tier.clone();
         }
-        let (best, median, matches) = measure(&lists, pat, &limits, cfg.reps);
+        let (best, median, matches) = h.measure(pat);
         println!(
             "{:<13} {:<26} {:>9.2} {:>9.2} {:>9.1} {:>9}",
             tier,
@@ -812,7 +833,7 @@ fn main() {
 
     let mut status = 0;
     if let Some(path) = &cfg.compare {
-        status = report_comparison(&read_baseline(path), &results, &id, noise_pct, noise);
+        status = report_comparison(&read_baseline(path), &results, &id, &h, noise_pct, noise);
     }
     if let Some(path) = &cfg.save {
         write_baseline(path, &id, noise_pct, &results);
@@ -837,6 +858,7 @@ fn report_comparison(
     base: &Baseline,
     now: &[Measured],
     id: &RunId,
+    h: &Harness,
     noise_pct: f64,
     noise: Noise,
 ) -> i32 {
@@ -947,30 +969,77 @@ fn report_comparison(
         "{:<26} {:>10} {:>10} {:>9}  verdict",
         "pattern", "was ms", "now ms", "delta"
     );
-    let mut regressions = 0;
+    let pct = |was: f64, now: f64| {
+        if was > 0.0 {
+            (now - was) / was * 100.0
+        } else {
+            0.0
+        }
+    };
+    let mut candidates: Vec<(&str, f64, f64)> = Vec::new();
     for m in now {
         let Some((was_ns, _, _)) = base.find(&m.pattern) else {
             continue;
         };
         let was = was_ns as f64 / 1e6;
         let now_ms = ms(m.best);
-        let delta = if was > 0.0 {
-            (now_ms - was) / was * 100.0
-        } else {
-            0.0
-        };
-        let verdict = if delta.abs() < threshold {
-            ""
-        } else if delta > 0.0 {
-            regressions += 1;
-            "REGRESS"
-        } else {
-            "FASTER"
-        };
+        let delta = pct(was, now_ms);
+        let flagged = delta.abs() >= threshold;
+        if flagged {
+            candidates.push((&m.pattern, was, delta));
+        }
         println!(
             "{:<26} {:>10.2} {:>10.2} {:>8.1}%  {}",
-            m.pattern, was, now_ms, delta, verdict
+            m.pattern,
+            was,
+            now_ms,
+            delta,
+            if flagged { "?" } else { "" }
         );
+    }
+
+    // Anything flagged gets re-timed before it is called a result.
+    //
+    // A single cross-process comparison of identical code is noisier than the
+    // in-process probe can see: measured over six such comparisons, the worst
+    // per-pattern delta was typically 4-5% but reached 9.7% once, and the pattern
+    // that drifted was different each time. Raising the threshold past that would
+    // have cost real sensitivity on the sub-millisecond patterns, where a genuine
+    // regression is also a few percent. Re-measuring is the cheaper trade: only a
+    // handful of patterns are ever flagged, transient jitter does not survive a
+    // second look, and a real change does.
+    let mut regressions = 0;
+    if candidates.is_empty() {
+        println!("\nnothing outside the noise floor; no re-measurement needed.");
+    } else {
+        println!(
+            "\nre-measuring {} flagged pattern(s) to separate jitter from signal:",
+            candidates.len()
+        );
+        println!(
+            "{:<26} {:>10} {:>10} {:>9}  verdict",
+            "pattern", "was ms", "again ms", "delta"
+        );
+        for (pattern, was, first_delta) in &candidates {
+            let (best, ..) = h.measure(pattern);
+            let again = ms(best);
+            let delta = pct(*was, again);
+            // Confirmed only when the second look agrees in direction *and* still
+            // clears the threshold.
+            let confirmed = delta.abs() >= threshold && delta.signum() == first_delta.signum();
+            let verdict = if !confirmed {
+                "jitter"
+            } else if delta > 0.0 {
+                regressions += 1;
+                "REGRESS"
+            } else {
+                "FASTER"
+            };
+            println!(
+                "{:<26} {:>10.2} {:>10.2} {:>8.1}%  {}",
+                pattern, was, again, delta, verdict
+            );
+        }
     }
 
     println!();
@@ -985,7 +1054,9 @@ fn report_comparison(
         return 3;
     }
     if regressions > 0 {
-        println!("VERDICT: {regressions} pattern(s) slower by more than {threshold:.1}%.");
+        println!(
+            "VERDICT: {regressions} pattern(s) confirmed slower by more than {threshold:.1}%."
+        );
         return 2;
     }
     println!("VERDICT: no regression beyond the noise floor.");
