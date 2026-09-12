@@ -24,6 +24,23 @@ worth opening before you work in that area:
 | [docs/mobile.md](docs/mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
 | [docs/versioning.md](docs/versioning.md) | bump the version, or wonder where a version string comes from |
 
+**Keep this file short: every session loads it, whether or not the work touches a
+given rule.** The bar for adding here is not "true and useful" but "an agent would
+get this wrong without being told, before it knows which files to open".
+
+- **Here:** invariants invisible in the code, commands that must be run, and rules
+  about how to *behave* (what to measure, what not to claim). Instructions aimed at
+  the agent can't live behind a link, because a link may not be followed.
+- **[docs/](docs/):** reasoning, measurements, history, rejected alternatives, and
+  checklists that only matter once you are already in that file. Add a trigger to
+  the table above, then link to it from the section here.
+- **A comment or a test:** anything whose home is next to the code it constrains. A
+  regression test pins an invariant better than a paragraph here, and cannot go
+  stale silently.
+
+A section growing past a screen is the signal to move its detail into `docs/` and
+leave a pointer. Prefer replacing text over appending to it.
+
 ## Building and checking
 
 Before committing, run all three and keep them clean:
