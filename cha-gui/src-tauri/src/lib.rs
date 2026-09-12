@@ -37,9 +37,8 @@ struct Dict {
 }
 
 // `(async)` runs this on Tauri's worker thread pool rather than the main thread.
-// Scanning the full word list (~270k entries) takes long enough that running it
-// on the main thread would freeze the window — no typing, no repaint — until it
-// returned. `Dict` is `Send + Sync`, so `State` access off-thread is safe. The
+// Scanning the full word list takes long enough that running it on the main
+// thread would freeze the window — no typing, no repaint — until it returned. `Dict` is `Send + Sync`, so `State` access off-thread is safe. The
 // body stays synchronous; there are no await points.
 //
 // The scan itself lives in `cha_core::search` so the web server's HTTP handler

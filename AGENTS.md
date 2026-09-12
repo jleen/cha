@@ -18,7 +18,7 @@ worth opening before you work in that area:
 
 | Document | Read it before you… |
 |---|---|
-| [docs/core.md](docs/core.md) | touch the matcher hot loop, change a `Limits` default, or quote a benchmark number |
+| [docs/core.md](docs/core.md) | touch the matcher hot loop, add pattern syntax, change a `Limits` default, or quote a benchmark number |
 | [docs/gui.md](docs/gui.md) | change Tauri command threading, add a window or menu item, or regenerate the desktop icon |
 | [docs/web.md](docs/web.md) | change an `/api` route, a server-side limit, the Dockerfile, or anything in `deploy/` |
 | [docs/mobile.md](docs/mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
@@ -38,6 +38,18 @@ cargo test --workspace
 dedicated to keeping it warning-free (e.g. prefer the `?` operator over an
 `if x.is_none() { return None }`). `cargo fmt` likewise: the repo is kept
 fully rustfmt-formatted, so run it before committing rather than hand-aligning.
+The one exception is `perf.rs`'s corpus table, which carries an explicit
+`#[rustfmt::skip]` to stay a table; that is not licence to hand-align anything
+else.
+
+**`--workspace` does not lint the examples.** `cha-core/examples/` is invisible to
+`cargo clippy --workspace`, so a warning there rots silently. When you touch
+`perf.rs` or `limitcal.rs`, also run:
+
+```
+cargo clippy -p cha-core --examples
+```
+
 The workspace has three members (`cha-core`, `cha-gui/src-tauri`, `cha-web`) plus
 the CLI crate (`cha`) at the root; `--workspace` covers the libraries — build the
 GUI explicitly with `cargo build -p cha-gui` when touching it. `--workspace` now
@@ -147,25 +159,44 @@ pattern language.
 
 ## Performance
 
-`cha` scans ~270k words per query and has ambitions toward >10M. Release-build
-baselines:
+`cha` scans the whole word list on every query, so a change to the matcher is a
+performance change until measured otherwise. Release baselines on an idle
+i7-14700K against the committed 83.6k-word `words.txt`: template `.....` ~1.2 ms,
+anagram `;..oting` ~1.8 ms, against targets of < 10 ms and < 20 ms. **Never quote
+a timing without its word count** — cost per word is flat, so the denominator is
+the whole claim.
 
-| Pattern type | Target | Achieved |
-|---|---|---|
-| Template (e.g. `qu...`) | < 10 ms | ~5 ms |
-| Anagram (e.g. `;..oting`) | < 20 ms | ~8 ms |
+Before *and* after any change to matching, pattern compilation, or a `Limits`
+default:
 
-Measure with `cha <pattern> -w words.txt -b 1000`, and **always against a
-baseline you measured on the same machine** (`git stash`, build, measure,
-`git stash pop`) — the numbers above are hardware-specific and now read low.
-Debug builds are 10–50× slower, which makes the mobile app look broken; the root
-`Cargo.toml` therefore forces `opt-level = 3` for `cha-core` even in dev. Keep
-that profile, and still prefer `--release` for any real timing.
+```
+./scripts/perf.sh --save      # on the "before" build (git stash, build)
+./scripts/perf.sh --compare   # on the "after" build
+```
 
-Both template paths reject on length before matching, and that early-out must
-stay a **pure filter** — nothing it drops could have matched. The reasoning, the
-benchmark harnesses, and the gap-run normalization that made star-heavy patterns
-tractable are in [docs/core.md](docs/core.md).
+It covers every matching path, diffs match counts as well as times, and judges
+deltas against a noise floor it measures. Exit 2 is a timing regression, 3 is
+moved match counts — **a changed match count outranks any timing delta**, because
+a word that exceeds a per-word limit degrades to "no match" and truncation reads
+as a speedup. The run takes ~20 s, so it is **not** a per-commit gate; skip it for
+docs, the GUI/web/mobile shells, the front end, and the workflows. New pattern
+syntax adds its own entry to `perf.rs`'s corpus in the same commit.
+`cha <pattern> -b <N>` is a quick spot check only: it bypasses `search` and
+reports a bare mean.
+
+**Don't quote a number you can't trust.** If the suite's verdict is `NOISY` or
+`UNRELIABLE`, or the machine is inherently suspect — a cloud sandbox, a shared CI
+runner, a CPU-quota container, a remote worktree, a machine under load — say so
+plainly, don't present the numbers as a before/after, and give the user the
+commands to run locally. Say it *before* doing perf-sensitive work, not after.
+Never extrapolate, estimate, or report a figure that wasn't measured.
+
+Two invariants worth carrying without looking them up: **resolve dispatch at
+compile time and bake it into the closure** (never branch on pattern syntax
+per word), and **keep the length early-out a pure filter** — nothing it drops
+could have matched. The rest of the pre-change checklist, the harnesses, and the
+gap-run normalization that made star-heavy patterns tractable are in
+[docs/core.md](docs/core.md).
 
 ## Matches carry optional detail (`MatchInfo`)
 

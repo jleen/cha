@@ -18,22 +18,106 @@ per-match detail. The standing rules distilled from this file live in
 
 ## Performance requirements
 
-`cha` searches ~270k words per query, and has ambitions to search
-even larger (>10M words) lists. Matching must be fast enough to feel
-instantaneous on a modern laptop. Current release-build baselines:
+`cha` searches the whole word list on every query, and has ambitions to search
+much larger (>10M word) lists. Matching must feel instantaneous on a modern
+laptop. The committed `words.txt` is **83,568 words after dedup**; release
+baselines measured on an idle i7-14700K against that list:
 
-| Pattern type | Target | Achieved |
+| Pattern type | Target | Measured |
 |---|---|---|
-| Template (e.g. `qu...`) | < 10 ms | ~5 ms |
-| Anagram (e.g. `;..oting`) | < 20 ms | ~8 ms |
+| Template (`.....`) | < 10 ms | ~1.2 ms |
+| Anagram (`;..oting`) | < 20 ms | ~1.8 ms |
 
-Two extra harnesses live in [`cha-core/examples/`](../cha-core/examples/) and are
-built only by `cargo test`/`--examples`, never by a plain `cargo build`, so they
-cost the shipped crate nothing: [`fuzzbench`](../cha-core/examples/fuzzbench.rs)
-times a full scan per pattern in ns/word (both match-time limits overridable via
-`CHA_BENCH_*` env vars, for pricing a candidate default), and
-[`limitcal`](../cha-core/examples/limitcal.rs) derives the smallest limit each
-pattern actually needs. Both read `words.txt` from the working directory.
+**A timing without its word count is not a result**, which is why the suite
+prints the denominator on every run. Earlier revisions of this file quoted ~5 ms
+and ~8 ms against "~270k words". Those figures were not wrong — they simply
+stopped describing the committed list. Re-measured on a synthetic 329k-word list
+built by suffixing `words.txt`, `;..oting` costs 6.9 ms, essentially where the
+old figure put it.
+
+That run is also the best evidence available for the >10M ambition: across a 4×
+change in list size, cost per word stayed flat at ~21 ns/word on the anagram
+tier. The scan is linear with a small constant, so scaling is a memory-footprint
+question (the `Vec<String>` and its dedup `HashSet` at load time) rather than an
+algorithmic one. `--words <path>` exists so that can be re-checked against a real
+large list without committing one.
+
+### The suite: `cha-core/examples/perf.rs`
+
+```
+./scripts/perf.sh --save      # on the "before" build
+./scripts/perf.sh --compare   # on the "after" build
+```
+
+One command, ~20 s, covering every matching path. `git stash` is still how you
+get the "before" build; what the suite replaces is eyeballing two columns of
+numbers and hoping. The wrapper forces `--release` and runs from the repo root so
+a relative word list resolves consistently; `perf.rs` refuses a debug build
+outright. Flags: `--list` (the corpus and what each entry exercises), `--tier`,
+`--words <path>` for a larger uncommitted list, `--pattern` for an ad-hoc one,
+and `CHA_BENCH_{BACKTRACK,FUZZY,MAX_RESULTS,DEADLINE}` for pricing a candidate
+`Limits` default. Exit status: 2 for a timing regression, 3 for moved match
+counts. The baseline lives in `target/cha-perf/baseline.tsv` — inside an
+already-ignored directory, because it is machine-local by nature.
+
+`limitcal` remains separate and unchanged: it is a correctness-floor calibrator,
+not a timer. (`fuzzbench` was folded into `perf`; its `CHA_BENCH_*` knobs and its
+fuzzy corpus both live there now. It had drifted to defaulting both match-time
+limits to 1_000_000, so its out-of-the-box numbers were never the shipped
+product's.)
+
+Both examples are built only by `cargo test` / `--examples` / `cargo run
+--example`, never by a plain `cargo build`, so they cost the shipped crates
+nothing. Neither pulls a dependency — `cha-core` still has exactly one, and there
+are no dev-dependencies in the workspace. Criterion was considered and rejected:
+its dependency tree is larger than this entire workspace's, and cross-machine
+statistical machinery buys nothing when the protocol is same-machine
+before/after.
+
+### Why the suite reports match counts first
+
+A changed match count is printed above the timings, in its own block, and
+overrides the verdict. The reason is the gap-run table further down this file:
+those patterns were not merely slow. `**********1**********1` returned **9_778 of
+25_193** real matches, because a word that exceeds a per-word limit degrades to
+"no match" rather than erroring. Truncation and slowness have the same cause and
+opposite signatures, so a timing-only harness reads a truncating regression as an
+improvement. Demonstrably: with `max_fuzzy_steps` cut to 200, `` *a*b*c*d*`2 ``
+gets **53% faster** and loses 4_843 matches.
+
+This is also why only the **word list** blocks a comparison. Differing limits are
+reported as context and the diff proceeds — "I lowered a limit, did it truncate?"
+is precisely the question the suite exists to answer, so refusing that comparison
+would defeat it.
+
+### Why it measures its own noise instead of detecting the machine
+
+Deltas are judged against a probe that re-measures the same cheap pattern several
+times and reports the spread. Detecting a slow environment by inspection does not
+work: the WSL2 box this was developed on exposes **no** cpufreq governor and
+**no** container marker, whether it happens to be a quiet 28-core desktop or a
+throttled sandbox. The banner reports what it can see (CPU, visible cores, load,
+container markers, governor when readable); the probe is what decides.
+
+Two calibrations inside it, both measured rather than guessed:
+
+- **Samples are amortized to ~20 ms.** Scheduler and timer jitter is a roughly
+  fixed number of microseconds, so it is several percent of a 1 ms scan and
+  invisible on a 300 ms one. Before amortization an unchanged build showed ±0.2%
+  on the expensive patterns and up to **7.3%** on the sub-millisecond ones — a
+  false regression on the cheapest and most important path in the crate. Each
+  sample now repeats the scan until it has run for `TARGET_SAMPLE`, which
+  equalizes precision instead of hiding the problem behind a laxer threshold.
+- **The probe measures best-of-N, not individual runs**, because best-of-N is
+  what `--compare` diffs and taking a minimum already discards most jitter. The
+  spread of single runs overstates the real floor by roughly an order of
+  magnitude and classified a perfectly quiet machine as unreliable. Best of 10
+  halves the spread versus best of 6; best of 16 does not improve on it.
+
+Post-calibration, an unchanged build reproduces within **~0.9% mean, ~3% worst
+case**, against a signal threshold of ~5%.
+
+### The length early-out
 
 **Both template paths reject on length first.** A star-free template matches
 exactly one length, and on a large list the overwhelming majority of words are
@@ -45,14 +129,15 @@ worth preserving: `fuzzy_match` is byte-indexed, every token but `Star` consumes
 exactly one byte, and `tokenize_fuzzy` rejects non-ASCII templates — so a word
 carrying a multi-byte char cannot match at any length. Fuzz does not widen this
 either; the budget lets a position *mismatch*, never disappear. Measured, the
-early-out takes a star-free fuzzy scan from ~18 to ~12 ns/word. Any change here
-must stay a *pure filter*: nothing it drops could have matched.
+early-out takes a star-free fuzzy scan from ~18 to ~12 ns/word.
 
-The benchmark flags (`cha <pattern> -w <wordlist> -b <N>`) are the primary way to
-measure regressions. Run with `-b 1000` to get stable averages, e.g.
-`cha ';..oting' -w words.txt -b 1000`. Always compare against a baseline you
-measured on the *same machine* (`git stash`, build, measure, `git stash pop`) —
-the absolute numbers in the table above are hardware-specific and now read low.
+Any change here must stay a *pure filter*: nothing it drops could have matched.
+Disabling the regex one costs **15–56%** across the star-free `template` tier and
+leaves `*ing`, `un*ed` and `*a*e*i*o*` (where `fixed_len` is `None`) untouched,
+with every match count unchanged — which is both what "pure filter" means and a
+good way to confirm the suite is wired up correctly.
+
+### Debug builds
 
 These are laptop **release** numbers. A phone CPU runs the hot loop maybe 2–3×
 slower, still comfortably interactive behind the 100 ms debounce. **Debug builds
@@ -61,6 +146,52 @@ looks broken — and `tauri {ios,android} dev` builds debug by default. The root
 `Cargo.toml` therefore forces `[profile.dev.package.cha-core] opt-level = 3`
 (leaf crate, negligible compile-time cost) so even dev builds have a usable
 matcher. Keep that profile; still prefer `--release` for any real timing.
+
+`cha <pattern> -b <N>` is still useful as a quick single-pattern spot check, but
+know what it is: it times the matcher closure directly, bypassing `search` (so no
+chunking, no `max_results`, no `MatchRow` allocation), and reports a bare mean
+with no warmup. It now uses the *checked* compile, so a contentless pattern says
+so instead of benchmarking a no-op matcher, and it prints the word count. For
+anything you intend to quote, use the suite.
+
+## Before you add pattern syntax
+
+Every item here is an invariant the current code already keeps. The hot loop runs
+once per word per query, so the reject path is what matters — the confirmed-match
+path is comparatively rare, which is why `diff_letters` can afford to allocate
+and the reject path cannot.
+
+- **Resolve dispatch at compile time and bake the result into the closure.**
+  Never branch on pattern syntax per word. `has_punct`, `fixed_len`,
+  `combo_pools`, `is_pure` and `collapse_gap_run` are all this pattern; syntax
+  that re-inspects itself inside the closure is the likeliest way to regress.
+- **Decide which of the three engines the new syntax joins** — the regex
+  template, the fuzzy tokenizer, or the anagram pool — and if it can't join one,
+  reject it *there* at compile time rather than half-supporting it. Precedent:
+  digit variables are refused on the fuzzy path because backreferences don't
+  compose with a mismatch budget.
+- **A new fuzzy token that consumes anything other than exactly one byte
+  invalidates two arguments at once**: `toks.len()` as the exact match length,
+  and the reason the fuzzy early-out needs no `is_ascii` guard. Audit both, or
+  the early-out stops being a pure filter.
+- **New regex-template syntax: check it still yields a usable `fixed_len`, and
+  whether it pushes fancy-regex off the linear `regex` engine.** Stars are not
+  the hazard; backreferences are. If it reaches the backtracking VM, re-run
+  `limitcal` and expect the floors to move.
+- **Any new gap-like symbol must join `collapse_gap_run`,** or it becomes a fresh
+  way for a user to rebuild the pathological shape by accident.
+- **Order checks cheapest-and-most-selective first,** and keep anything that
+  allocates behind every fast reject.
+- **Any new combinatorial expansion needs a `Limits` ceiling checked with
+  `checked_mul` before the product is built** — a compile-time blowup is
+  unreachable by a deadline.
+- **Add the new syntax to `perf.rs`'s corpus in the same commit.** This is what
+  keeps the suite honest as the language grows.
+
+The first bullet and the `fixed_len` one bite hardest, and the suite shows you
+both distinctly: a per-word branch on pattern syntax appears as a uniform
+slowdown across a whole tier, while a broken length early-out appears on exactly
+the patterns whose `fixed_len` is `Some` and nowhere else.
 
 ## Every backtracking path needs a bound (`Limits`)
 
@@ -120,7 +251,8 @@ fields, which is cheaper than making every caller build a nested struct.
 **Enforcing the match-time limits costs nothing measurable.** `backtrack_limit`
 only picks the threshold `fancy-regex` compares against — it increments its
 counter either way. `max_fuzzy_steps` was A/B'd against a build with the counter
-deleted outright ([`fuzzbench`](../cha-core/examples/fuzzbench.rs)); the counted
+deleted outright (the timing harness now in
+[`perf`](../cha-core/examples/perf.rs)); the counted
 build came out a wash or slightly *faster* across every pattern and every round,
 the difference being codegen noise. Don't "optimize" either one away.
 

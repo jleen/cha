@@ -26,9 +26,9 @@
 //! Neither match-time limit costs anything measurable to *enforce*.
 //! `backtrack_limit` only picks the threshold `fancy-regex` compares against; it
 //! increments its counter unconditionally either way. And `max_fuzzy_steps` was
-//! measured against a build with the counter removed outright — see
-//! `examples/fuzzbench.rs` — which came out a wash or slightly slower, the
-//! difference being codegen noise rather than the decrement.
+//! measured against a build with the counter removed outright — with the timing
+//! harness now in `examples/perf.rs` — which came out a wash or slightly slower,
+//! the difference being codegen noise rather than the decrement.
 
 use std::time::Instant;
 

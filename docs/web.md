@@ -77,6 +77,24 @@ Note axum's own extractors (body limit, JSON parse) reject with **plain text**,
 not the `{"error": ...}` envelope `ApiError` produces. That's fine — `transport.js`
 falls back to the raw body — but don't assume every error response is JSON.
 
+## `--bench` ships in the server on purpose
+
+`cha-web --bench '<pattern>' [--bench-count N]` times a pattern against the
+configured dictionary and exits instead of serving, reporting min/mean/max after
+one unmeasured warmup pass, plus a verdict against the 2 s request deadline.
+
+It is compiled into the shipped binary deliberately, and that is not an oversight
+to tidy up. The server's limits are tighter than the desktop's and only actually
+fire on the deployment, against the deployment's real dictionary and CPU share —
+numbers from a developer laptop don't transfer. It costs two `Args` fields and one
+function, and no dependency.
+
+It answers a different question from
+[`cha-core/examples/perf.rs`](../cha-core/examples/perf.rs), which is the
+before/after regression suite for the matcher itself (see
+[core.md](core.md)): this one answers "is *this machine* too slow, or is *this
+pattern* expensive?" on the box that's actually serving.
+
 ## Deployment (`deploy/`)
 
 `deploy/` holds the Dockerfile, a compose example, and Caddy + nginx snippets;

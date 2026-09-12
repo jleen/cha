@@ -86,7 +86,7 @@ impl From<PatternError> for SearchError {
 /// The deadline must *not* be checked per word. `Instant::now()` is a syscall-ish
 /// read on every platform, and the per-word loop is the hot path the whole crate
 /// is tuned around — the same reasoning that keeps `HashMap` and `to_lowercase`
-/// out of it. At this size a full 270k-word list costs ~66 clock reads, while
+/// out of it. At this size a 270k-word list costs ~66 clock reads, while
 /// still bounding overshoot to well under a millisecond.
 const DEADLINE_CHECK_INTERVAL: usize = 4096;
 

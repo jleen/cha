@@ -17,7 +17,7 @@ them — the ones that should be in mind before any change — live in
 
 | Document | Read it before you… |
 |---|---|
-| [core.md](core.md) | touch the matcher hot loop, change a `Limits` default, or quote a benchmark number |
+| [core.md](core.md) | touch the matcher hot loop, add pattern syntax, change a `Limits` default, or quote a benchmark number |
 | [gui.md](gui.md) | change Tauri command threading, add a window or menu item, or regenerate the desktop icon |
 | [web.md](web.md) | change an `/api` route, a server-side limit, the Dockerfile, or anything in `deploy/` |
 | [mobile.md](mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |

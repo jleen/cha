@@ -239,13 +239,30 @@ fn main() {
 
     let pat = args.pattern.as_deref().unwrap();
 
+    if args.bench_count == 0 {
+        eprintln!("error: -b/--bench-count must be at least 1");
+        process::exit(1);
+    }
+
     if args.bench_count == 1 {
         run_pattern(pat, &words, args.delta);
     } else {
-        let matcher = pattern::compile_pattern(pat).unwrap_or_else(|e| {
-            eprintln!("error: {}", e);
-            process::exit(1);
-        });
+        // Use the *checked* compile, as `run_pattern` does. A contentless pattern
+        // (a bare `;`) compiles to a matcher that returns `None` for every word,
+        // so benchmarking it would report a beautiful number for no work at all.
+        let matcher = match pattern::compile_pattern_checked(pat) {
+            Ok(pattern::Compiled {
+                note: Some(note), ..
+            }) => {
+                eprintln!("{}; nothing to benchmark", note);
+                return;
+            }
+            Ok(pattern::Compiled { matcher, .. }) => matcher,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        };
         let start = Instant::now();
         for _ in 0..args.bench_count {
             for word in &words {
@@ -253,11 +270,16 @@ fn main() {
             }
         }
         let elapsed = start.elapsed();
+        // Report the word count: a per-iteration time means nothing without the
+        // size of the list it scanned.
         eprintln!(
-            "{} iterations in {:.3}s ({:.3}ms each)",
+            "{} words, {} iterations in {:.3}s ({:.3}ms each)",
+            words.len(),
             args.bench_count,
             elapsed.as_secs_f64(),
             elapsed.as_secs_f64() * 1000.0 / args.bench_count as f64
         );
+        eprintln!("note: -b times the matcher closure only and reports a bare mean.");
+        eprintln!("      For a before/after comparison use ./scripts/perf.sh.");
     }
 }

@@ -10,8 +10,9 @@ members = ["cha-core", "cha-gui/src-tauri", "cha-web"]
 [workspace.package]
 version = "0.6.2"
 
-# The matcher's hot loop scans ~270k words per query and is unusable when
-# compiled unoptimized — a debug `tauri android dev` / `ios dev` build (both
+# The matcher's hot loop scans the whole word list on every query (83.6k words as
+# committed; the crate aims much higher) and is unusable when compiled
+# unoptimized — a debug `tauri android dev` / `ios dev` build (both
 # build debug by default) would make the app look broken and slander the
 # benchmarks. Optimize just this leaf crate even in dev builds; it has one small
 # dependency, so compile times barely move, and it speeds up desktop `cargo run`
