@@ -87,6 +87,13 @@ pub fn compile_pattern_checked_with(
     let parts: Vec<&str> = pattern_str.split('&').collect();
     let mut matchers: Vec<(bool, Matcher)> = Vec::new();
     let mut contentless = false;
+    // Whether the *pattern* asks for punctuation, decided below from the trimmed
+    // parts rather than from `pattern_str`. It must see exactly the text that gets
+    // compiled: the whitespace a user puts around `&` or after `!` is separator,
+    // not content, and a space is one of the three marks in `PUNCTUATION`, so
+    // reading the raw string made ` & ` silently disable punctuation stripping for
+    // the whole query.
+    let mut has_punct = false;
 
     for part in parts {
         let part = part.trim();
@@ -95,6 +102,7 @@ pub fn compile_pattern_checked_with(
         } else {
             (false, part)
         };
+        has_punct |= actual.chars().any(|c| PUNCTUATION.contains(&c));
         // Compile every part regardless, so a real syntax error in any part
         // (e.g. `;&ca$t`) still surfaces as a hard `Err` and takes precedence
         // over the contentless note.
@@ -110,8 +118,6 @@ pub fn compile_pattern_checked_with(
             note: Some(CONTENTLESS_NOTE.to_string()),
         });
     }
-
-    let has_punct = pattern_str.chars().any(|c| PUNCTUATION.contains(&c));
 
     let matcher: Matcher = Box::new(move |word: &str| {
         let test_word: Cow<str> = if has_punct {
@@ -1201,6 +1207,76 @@ mod tests {
         let m = compile_pattern("it's").unwrap();
         assert!(m("it's").is_some());
         assert!(m("its").is_none());
+    }
+
+    // Whitespace around `&` and after `!` is separator, not content. Before
+    // `has_punct` was derived from the trimmed parts, a space anywhere in the raw
+    // pattern counted as punctuation (a space is one of the three `PUNCTUATION`
+    // marks), which silently turned off word punctuation-stripping for the whole
+    // query — so `.... & *t` quietly matched fewer words than `....&*t`.
+    #[test]
+    fn test_spaces_around_conjunction_do_not_change_matches() {
+        let tight = compile_pattern("....&*t").unwrap();
+        let spaced = compile_pattern(".... & *t").unwrap();
+        for word in ["ain't", "'bout", "abet", "cant"] {
+            assert_eq!(
+                tight(word).is_some(),
+                spaced(word).is_some(),
+                "`....&*t` and `.... & *t` disagree on {word:?}"
+            );
+        }
+        // Specifically, both stripping: "ain't" is four letters once the
+        // apostrophe goes, and ends in `t`.
+        assert!(tight("ain't").is_some());
+        assert!(spaced("ain't").is_some());
+    }
+
+    #[test]
+    fn test_spaces_around_negation_do_not_change_matches() {
+        let tight = compile_pattern("....&!*t").unwrap();
+        let spaced = compile_pattern(".... & ! *t").unwrap();
+        for word in ["ain't", "abet", "acre"] {
+            assert_eq!(
+                tight(word).is_some(),
+                spaced(word).is_some(),
+                "negation spelling disagrees on {word:?}"
+            );
+        }
+    }
+
+    // The guard against over-correcting the above: punctuation *inside* a part is
+    // content, and must still suppress stripping for the whole pattern.
+    //
+    // `m("it's")` is the discriminating case. With stripping correctly off, the
+    // word is tested as written and both parts match. Were `has_punct` false, the
+    // word would arrive as "its" and the `it's` part could never match it — so
+    // this fails if the fix above ever stops seeing interior punctuation. Note
+    // both parts have to spell the apostrophe: `.` and `*` are letter-only, so
+    // once stripping is off, a gap-only part cannot match a punctuated word at
+    // all.
+    #[test]
+    fn test_interior_punctuation_still_suppresses_stripping() {
+        for pattern in ["it's&*'*", "it's & *'*"] {
+            let m = compile_pattern(pattern).unwrap();
+            assert!(m("it's").is_some(), "{pattern} should match \"it's\"");
+            assert!(m("its").is_none(), "{pattern} should not match \"its\"");
+        }
+    }
+
+    // A leading or trailing space was already discarded by `part.trim()` before
+    // the template was compiled, so counting it as punctuation made `has_punct`
+    // disagree with the matcher that was actually built.
+    #[test]
+    fn test_surrounding_whitespace_is_not_pattern_content() {
+        let padded = compile_pattern("  ....  ").unwrap();
+        let bare = compile_pattern("....").unwrap();
+        for word in ["ain't", "abet", "cant"] {
+            assert_eq!(
+                padded(word).is_some(),
+                bare(word).is_some(),
+                "padding changed the meaning of `....` for {word:?}"
+            );
+        }
     }
 
     #[test]

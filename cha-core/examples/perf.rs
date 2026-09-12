@@ -159,12 +159,14 @@ const CORPUS: &[Probe] = &[
     // first, then does the extra/unused licence arithmetic.
     Probe { tier: "hybrid", pattern: "........;gdangboot", exercises: "template plus pool, star-free" },
     Probe { tier: "hybrid", pattern: "......*;gdangboot", exercises: "template plus pool with a star" },
-    // Composition. Note the two spellings of the same conjunction are not the
-    // same query: `has_punct` is computed on the whole raw pattern, so the
-    // spaces around `&` suppress punctuation stripping. Both are here so the
-    // divergence stays visible (260 matches vs 254 on the committed words.txt).
-    Probe { tier: "compose", pattern: "....&*t", exercises: "conjunction, unspaced: punctuation stripping stays on" },
-    Probe { tier: "compose", pattern: ".... & *t", exercises: "conjunction, spaced: the spaces make has_punct true and disable stripping" },
+    // Composition. Both spellings of one conjunction are here as a pair on
+    // purpose: whitespace around `&` is separator, so they must stay identical in
+    // match count (260 on the committed words.txt) and in cost. They once
+    // differed, because `has_punct` was read from the raw pattern and a space is
+    // one of the three PUNCTUATION marks; the spaced form skipped the stripping
+    // scan and looked 20% faster for 6 fewer matches. Keep both entries.
+    Probe { tier: "compose", pattern: "....&*t", exercises: "conjunction, unspaced" },
+    Probe { tier: "compose", pattern: ".... & *t", exercises: "conjunction, spaced: must match the unspaced form exactly" },
     Probe { tier: "compose", pattern: ";..oting&!*ing", exercises: "negated part: must not match, contributes no MatchInfo" },
     // Volume: the max_results cap and the confirmed-match path, which is where
     // MatchRow and diff_letters allocate.

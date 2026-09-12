@@ -117,7 +117,11 @@ not chars) is the right function to call from the anagram closure. `count_chars`
 **Punctuation stripping uses `Cow<str>` to avoid allocation.** In
 `compile_pattern`, `test_word` borrows the original word when neither the
 pattern nor the word contains punctuation — the common case for a Scrabble
-wordlist. Allocation only happens when stripping is actually needed.
+wordlist. Allocation only happens when stripping is actually needed. The
+*pattern* side of that test must read the trimmed `&`-parts, never the raw
+string: separator whitespace is not content, and a space is one of the three
+marks in `PUNCTUATION`, so reading the raw string makes ` & ` silently disable
+stripping for the whole query.
 
 ## Pattern compilation is fallible
 
