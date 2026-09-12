@@ -31,7 +31,7 @@ Before committing, run all three and keep them clean:
 ```
 cargo fmt
 cargo clippy --workspace
-cargo test
+cargo test --workspace
 ```
 
 `cargo clippy` is treated as required here, not advisory — there are commits
@@ -41,8 +41,18 @@ fully rustfmt-formatted, so run it before committing rather than hand-aligning.
 The workspace has three members (`cha-core`, `cha-gui/src-tauri`, `cha-web`) plus
 the CLI crate (`cha`) at the root; `--workspace` covers the libraries — build the
 GUI explicitly with `cargo build -p cha-gui` when touching it. `--workspace` now
-also pulls `cha-web`'s axum/tokio tree, which makes the pre-commit loop slower;
-that's expected.
+also pulls `cha-web`'s axum/tokio tree — 87 crates against `cha-core`'s 8 — but
+the cost of that is small and worth measuring before working around it: on a
+28-core box a from-scratch `cargo build` of the whole chain is ~14 s, of which
+axum's tier is ~6 s, and an incremental `clippy --workspace` is under a second.
+`tokio`'s features are already narrowed to the five this server uses, so there
+is no easy win left; don't trade the check's coverage for its speed.
+
+**`--workspace` is load-bearing on `cargo test`, not decoration.** The root
+package is the CLI crate `cha`, which has no tests of its own, so a plain
+`cargo test` resolves to that package and cheerfully reports success having run
+**zero** tests. All 113 live in `cha-core`. No CI job runs tests either — the
+workflows are release-only — so this command is the entire test gate.
 
 **Keep the mobile cross-compiles `-p cha-gui`.** They resolve only that crate's
 graph, so `cha-web` is never built for a phone. Generalizing them to

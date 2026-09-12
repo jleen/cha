@@ -835,7 +835,9 @@ fn compile_anagram(
                 // Wildcards license a deviation from either criterion.
                 // Wildcards consume pattern symbols without actually adding license,
                 // until all wildcards are consumed, at which point they license non-pool letters.
-                if extra_count > num_wildcards && unused_count > num_wildcards.saturating_sub(candidate_len) {
+                if extra_count > num_wildcards
+                    && unused_count > num_wildcards.saturating_sub(candidate_len)
+                {
                     continue;
                 }
 
