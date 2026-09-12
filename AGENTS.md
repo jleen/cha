@@ -1,4 +1,28 @@
-# Implementation notes for cha
+> **Provenance:** Written by Claude (Anthropic) while doing the work it
+> describes. Reviewed in the normal course of review, but not audited line by
+> line — treat specific numbers, paths, and version pins as claims to verify
+> rather than guarantees.
+>
+> See [docs/README.md](docs/README.md).
+
+# Instructions for agents working in this repo
+
+Cha is a Rust workspace shipping one matcher (`cha-core`) to five surfaces: a
+CLI (`cha`), a Tauri desktop app (`cha-gui`), an axum server (`cha-web`), and
+iOS + Android builds of that same GUI crate. There is exactly one copy of the
+front end, in `cha-gui/ui/`, embedded by every shell that serves it.
+
+This file is the standing rules — the things worth having in mind before any
+change. The long-form *why* for each surface lives in [docs/](docs/), and is
+worth opening before you work in that area:
+
+| Document | Read it before you… |
+|---|---|
+| [docs/core.md](docs/core.md) | touch the matcher hot loop, change a `Limits` default, or quote a benchmark number |
+| [docs/gui.md](docs/gui.md) | change Tauri command threading, add a window or menu item, or regenerate the desktop icon |
+| [docs/web.md](docs/web.md) | change an `/api` route, a server-side limit, the Dockerfile, or anything in `deploy/` |
+| [docs/mobile.md](docs/mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
+| [docs/versioning.md](docs/versioning.md) | bump the version, or wonder where a version string comes from |
 
 ## Building and checking
 
@@ -49,93 +73,6 @@ is a hard `build.rs` panic, not a graceful notice — mobile has no `dictionarie
 folder to fall back to, so a dictionary-less mobile app can't be recovered by
 the user and must not build. See the mobile section.
 
-## Versioning: one number, in `[workspace.package]`
-
-**To bump the version, edit `version` under `[workspace.package]` in the root
-`Cargo.toml`. That is the only place.** All four crates inherit it with
-`version.workspace = true`, and everything downstream chains off that:
-
-- **The Tauri bundle version** — `tauri.conf.json` deliberately has **no**
-  `version` field. Tauri falls back to `CARGO_PKG_VERSION` from
-  `cha-gui/src-tauri/Cargo.toml` (see `tauri-codegen`'s `context.rs`). Don't
-  "helpfully" add the field back; that reintroduces a second source of truth.
-  Tauri's own docs recommend the opposite direction, which is right for a
-  single-crate app and wrong for this four-crate workspace.
-- **Android's `versionName`/`versionCode`** — derived from the crate version
-  into the git-ignored `gen/android/app/tauri.properties`, regenerated per build.
-- **The container image tag and the GitHub release name** — derived from the git
-  tag, *not* from the source. The `verify-version` job in `release.yml` gates
-  both release jobs on the tag matching this version, so a `v0.6.0` tag on a
-  0.5.0 tree fails before anything reaches GHCR.
-- **iOS's `CFBundleShortVersionString`/`CFBundleVersion`** — indirected through
-  build settings. `gen/apple/cha-gui_iOS/Info.plist` holds `$(MARKETING_VERSION)`
-  and `$(CURRENT_PROJECT_VERSION)` rather than literals, and
-  [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) sets both on the
-  `xcodebuild` command line — the marketing version parsed out of this same
-  `Cargo.toml`, the build number from the run number. Command-line build settings
-  outrank the project, so **nothing that ships can drift.** The literals still
-  present in `project.yml` and `project.pbxproj` are fallbacks for *local* Xcode
-  and `tauri ios dev` builds only; they're cosmetic and don't need chasing on
-  every bump — with one exception, a hand-driven Organizer archive, which does
-  read them (see "iOS, remote tester → TestFlight" below). (Why a separate build
-  number at all: App Store Connect rejects a
-  repeat of a `(CFBundleShortVersionString, CFBundleVersion)` pair, so re-uploading
-  a fixed build of the same version needs a number that only ever increases.)
-  Keep `project.yml` and `Info.plist` in sync by hand — nothing runs XcodeGen in
-  CI, and `tauri ios init` would clobber the hand edits in `project.yml` (the
-  `PATH` preBuildScript, `ARCHS`, `LIBRARY_SEARCH_PATHS`).
-
-One accepted cost of dropping `version` from `tauri.conf.json`: a macOS
-`tauri dev` run's embedded `Info.plist` no longer gets
-`CFBundleShortVersionString` (that codegen branch is gated on the field being
-present, and on `dev` — release bundles are unaffected).
-
-## Performance requirements
-
-`cha` searches ~270k words per query, and has ambitions to search
-even larger (>10M words) lists. Matching must be fast enough to feel
-instantaneous on a modern laptop. Current release-build baselines:
-
-| Pattern type | Target | Achieved |
-|---|---|---|
-| Template (e.g. `qu...`) | < 10 ms | ~5 ms |
-| Anagram (e.g. `;..oting`) | < 20 ms | ~8 ms |
-
-Two extra harnesses live in [`cha-core/examples/`](cha-core/examples/) and are
-built only by `cargo test`/`--examples`, never by a plain `cargo build`, so they
-cost the shipped crate nothing: [`fuzzbench`](cha-core/examples/fuzzbench.rs)
-times a full scan per pattern in ns/word (both match-time limits overridable via
-`CHA_BENCH_*` env vars, for pricing a candidate default), and
-[`limitcal`](cha-core/examples/limitcal.rs) derives the smallest limit each
-pattern actually needs. Both read `words.txt` from the working directory.
-
-**Both template paths reject on length first.** A star-free template matches
-exactly one length, and on a large list the overwhelming majority of words are
-the wrong length — so an integer compare replaces the match for most of the scan.
-The regex path compares against `template_to_regex`'s `fixed_len`, and must keep
-its `is_ascii` guard (byte length only bounds char count from below). The fuzzy
-path compares against `toks.len()` and needs **no** such guard, and the reason is
-worth preserving: `fuzzy_match` is byte-indexed, every token but `Star` consumes
-exactly one byte, and `tokenize_fuzzy` rejects non-ASCII templates — so a word
-carrying a multi-byte char cannot match at any length. Fuzz does not widen this
-either; the budget lets a position *mismatch*, never disappear. Measured, the
-early-out takes a star-free fuzzy scan from ~18 to ~12 ns/word. Any change here
-must stay a *pure filter*: nothing it drops could have matched.
-
-The benchmark flags (`cha <pattern> -w <wordlist> -b <N>`) are the primary way to
-measure regressions. Run with `-b 1000` to get stable averages, e.g.
-`cha ';..oting' -w words.txt -b 1000`. Always compare against a baseline you
-measured on the *same machine* (`git stash`, build, measure, `git stash pop`) —
-the absolute numbers in the table above are hardware-specific and now read low.
-
-These are laptop **release** numbers. A phone CPU runs the hot loop maybe 2–3×
-slower, still comfortably interactive behind the 100 ms debounce. **Debug builds
-are the real trap:** unoptimized, the matcher is 10–50× slower and the mobile app
-looks broken — and `tauri {ios,android} dev` builds debug by default. The root
-`Cargo.toml` therefore forces `[profile.dev.package.cha-core] opt-level = 3`
-(leaf crate, negligible compile-time cost) so even dev builds have a usable
-matcher. Keep that profile; still prefer `--release` for any real timing.
-
 ## Non-obvious invariants
 
 **Words are pre-lowercased.** `dictionary::load_words` lowercases every word
@@ -173,526 +110,89 @@ string shown in the UI.
 
 Pattern input is untrusted — even from a local user, a plausible-looking pattern
 could hang or OOM the app. There are **three** superlinear paths in `pattern.rs`,
-all bounded by [`Limits`](cha-core/src/limits.rs), whose `Default` is generous
-enough that no hand-typed pattern reaches it. `compile_pattern`/
-`compile_pattern_checked` use the defaults; `compile_pattern_with`/
-`compile_pattern_checked_with` take explicit limits, which is how a server passes
-tighter ones.
+all bounded by [`Limits`](cha-core/src/limits.rs). Do not add a backtracking or
+combinatorial path without a ceiling there.
 
-**One struct, split by phase — not by module.** `Limits` lives in its own module
-and carries all six ceilings, including the two the *scan* consults
-(`max_results`, `deadline`). It was previously two nested structs, `CompileLimits`
-inside `SearchLimits`, which implied a compile/scan split that the fields do not
-actually follow: `backtrack_limit` and `max_fuzzy_steps` sat in `CompileLimits`
-but bind **per candidate word**. The distinction that matters to a caller is
-*when a limit binds*, and that cuts across both modules, so the doc comments —
-not the type — carry it. `compile_pattern_checked_with` ignores the two scan-time
-fields, which is cheaper than making every caller build a nested struct.
+- **`max_anagram_combos` binds at *compile* time**, and that is the one to
+  understand. `compile_anagram` materializes the full cartesian product of every
+  `[...]` group *before any word is scanned*, so a per-word deadline or a scan
+  timeout **cannot** catch it — the check must stay where it is, before the
+  product is built, and must use `checked_mul` (a wrapped value slips under the
+  cap).
+- **`backtrack_limit` and `max_fuzzy_steps` bind per candidate word**;
+  `max_results` and `deadline` bind during the scan. Enforcing any of them costs
+  nothing measurable — don't "optimize" them away.
+- **The match-time defaults are calibrated, not guessed.** Re-run
+  [`limitcal`](cha-core/examples/limitcal.rs) before changing either number, and
+  read [docs/core.md](docs/core.md) first.
 
-- **`max_anagram_combos` — the dangerous one, and the only one that binds at
-  *compile* time.** `compile_anagram` calls `cartesian_product`, which
-  materializes the full product of every `[...]` group *before any word is
-  scanned*, and `combo_pools` then expands each combo into 216 bytes. Growth is
-  multiplicative in the group count: `;[abcde]`×8 is 390_625 combos (~84 MB,
-  ~28 s) and ×10 is ~9.7M (~2.1 GB). Because it happens during compile, a
-  per-word deadline or a scan timeout **cannot** catch it — the check must stay
-  where it is, before the product is built. Use `checked_mul`: the product
-  overflows `usize` at around 28 five-way groups, and a wrapped value would slip
-  under the cap.
-- **`backtrack_limit` — match-time, per word.** Bounds `fancy-regex` on the
-  non-fuzzy template path. It binds far more narrowly than it looks: a template
-  with **no digit variables** compiles to something `fancy-regex` hands straight
-  to the linear `regex` crate (`RegexImpl::Wrap`), which never backtracks. Stars
-  alone are therefore *not* the hazard — measured, `**********cat` and
-  `*a*e*i*o*` both run correctly with `backtrack_limit` set to **1**, at the same
-  ~22 ns/word as everything else on that path. Backreferences are what reach the
-  backtracking VM, and stars *combined* with them are what go exponential — but
-  only stars that survive collapsing (see below), i.e. alternating stars with
-  *distinct* backreferences: `*1*2*1*2*` needs ~1_315 steps, and
-  `*1*2*3*4*1*2*3*4*` is still budget-bound at the default (~3 s per scan, 566
-  matches at 20_000 vs 579 at 200_000). Cite that shape, not a star-only one,
-  when explaining why this limit exists.
-- **`max_fuzzy_steps` — match-time, per word.** Bounds `fuzzy_match`, the
-  hand-rolled backtracker on the fuzzy path. Note its `budget` parameter is the
-  *fuzz allowance*, a different quantity — don't overload it. Depth was never the
-  exposure either; the `Star` arm branches twice per node, and it is the node
-  count that was unbounded.
-- **`max_results` and `deadline` — scan-time, and both effectively free.**
-  `max_results` is one integer compare per *match* (not per word), on a path
-  already allocating a `MatchRow`; it removes work rather than adding it.
-  `deadline` is checked once per `DEADLINE_CHECK_INTERVAL` (4096) words, and
-  measured against the cheapest possible scan (~12 ns/word) a never-firing
-  deadline is indistinguishable from `None`. Do **not** move it per-word.
-
-**Enforcing the match-time limits costs nothing measurable.** `backtrack_limit`
-only picks the threshold `fancy-regex` compares against — it increments its
-counter either way. `max_fuzzy_steps` was A/B'd against a build with the counter
-deleted outright ([`fuzzbench`](cha-core/examples/fuzzbench.rs)); the counted
-build came out a wash or slightly *faster* across every pattern and every round,
-the difference being codegen noise. Don't "optimize" either one away.
-
-**The match-time defaults are calibrated, not guessed.**
-[`limitcal`](cha-core/examples/limitcal.rs) binary-searches, per pattern, the
-smallest limit that still returns every match an unlimited one finds (both limits
-are monotone, so this is well-defined). Realistic patterns need very little — the
-worst are `*1*1` at 193 steps and `` *a*e*`1 `` at 396 — and a deliberately
-adversarial tier tops out at 1_315 and 3_698. The defaults are ~15x that
-adversarial worst case. They were **1_000_000 apiece**, which bounded nothing
-useful: `` **********cat`1 `` took **66 s** for one scan under that ceiling while
-finding all of its real matches within 57 steps. Cost is linear in the limit, so
-lowering it was nearly free in correctness and worth ~8x in time. Re-run
-`limitcal` before changing either number — note the floors are set by
-`*1*2*1*2*` and `` *a*b*c*d*`2 ``, whose digits break the gap runs for real, so
-the normalization below did not move them.
-
-**Runs of `.` and `*` are normalized, and that is the real fix for star-heavy
-patterns.** A maximal run of gap symbols with k dots and at least one star
-accepts exactly the words of length >= k, *whatever the interleaving* — each `.`
-contributes one letter, each `*` zero or more, and one star absorbs the surplus.
-So the run rewrites to `.`xk then a single `*`. Both symbols are letter-only on
-both paths (`[a-z]`/`FuzzTok::Any` and `[a-z]*`/`FuzzTok::Star`) and neither
-consumes fuzz budget, so the rewrite is exact. Both template paths call
-`collapse_gap_run` from their `*` arm; the anagram path already folds `.` into a
-count and `*` into a `has_star` bool, so it is order-independent already.
-
-Two things to preserve here. **Do it at the parsed level, never by
-string-rewriting the raw pattern** — a `*` or `.` inside a `[...]` class is a
-class member, and `c[a.b]t` must keep matching exactly three characters. And
-**handle `.` alongside `*`, not just `**`**: a star-only collapse is trivially
-defeated by sprinkling dots between the stars, which is exactly how a user
-rebuilds the pathological shape by accident.
-
-The payoff dwarfs the limit tuning:
-
-| pattern | before | after |
-|---|---|---|
-| `` **********cat`1 `` | 7.9 s | 8.7 ms |
-| `**********1**********1` | 24.7 s, 9_778 matches | 139 ms, 25_193 matches |
-| `` *.*.*.*.*.*.*.*.*.*cat`1 `` | 686 ms | 3.4 ms |
-| `*.*.*1*.*.*1` | 2.9 s, 14_333 matches | 78 ms, 14_386 matches |
-
-Note the match counts: those patterns were exceeding a per-word limit and
-degrading the over-budget words to "no match", silently returning a fraction of
-the real result. **A limit that truncates is a correctness bug**, so removing the
-redundant work is strictly better than raising the ceiling. `test_every_gap_run_
-normalizes_exactly` brute-forces every interleaving up to length 5 against the
-normalized form; keep it if you touch this.
-
-Exceeding a *match-time* limit degrades to "no match" (via the existing
-`unwrap_or(false)` and the `steps == 0` early return), which is what keeps the
-hot path `Result`-free — see the section above. Exceeding the *compile-time*
-limit is a normal `PatternError`.
+Exceeding a *match-time* limit degrades to "no match", which is what keeps the
+hot path `Result`-free. Exceeding the *compile-time* limit is a normal
+`PatternError`. **A limit that truncates is a correctness bug**, so prefer
+removing redundant work to raising a ceiling.
 
 When adding a limit, test both halves: rejected under tight limits **and**
 behaviorally unchanged under the defaults, so a limiter can't silently narrow the
 pattern language.
 
+## Performance
+
+`cha` scans ~270k words per query and has ambitions toward >10M. Release-build
+baselines:
+
+| Pattern type | Target | Achieved |
+|---|---|---|
+| Template (e.g. `qu...`) | < 10 ms | ~5 ms |
+| Anagram (e.g. `;..oting`) | < 20 ms | ~8 ms |
+
+Measure with `cha <pattern> -w words.txt -b 1000`, and **always against a
+baseline you measured on the same machine** (`git stash`, build, measure,
+`git stash pop`) — the numbers above are hardware-specific and now read low.
+Debug builds are 10–50× slower, which makes the mobile app look broken; the root
+`Cargo.toml` therefore forces `opt-level = 3` for `cha-core` even in dev. Keep
+that profile, and still prefer `--release` for any real timing.
+
+Both template paths reject on length before matching, and that early-out must
+stay a **pure filter** — nothing it drops could have matched. The reasoning, the
+benchmark harnesses, and the gap-run normalization that made star-heavy patterns
+tractable are in [docs/core.md](docs/core.md).
+
 ## Matches carry optional detail (`MatchInfo`)
 
-`Matcher` is `Box<dyn Fn(&str) -> Option<MatchInfo>>`: `None` means no match,
-`Some(info)` means a match. `MatchInfo { unused, extra }` reports, for anagram
-matches, the pool letters the word leaves **unused** and the word letters
-**not in the pool** (both uppercased and sorted; empty when there's nothing to
-report — e.g. an exact anagram). It does **not** affect match validity; it's
-purely informational. The GUI renders it as a faint `−UNUSED +EXTRA` suffix to
-the right of each word ([`cha-gui/ui/main.js`](cha-gui/ui/main.js),
-`.word-annot` in [`styles.css`](cha-gui/ui/styles.css)); the CLI ignores it and
-just checks `.is_some()`.
+`Matcher` is `Box<dyn Fn(&str) -> Option<MatchInfo>>`: `None` means no match.
+The `unused`/`extra` letter diffing runs **only on the confirmed-match path**,
+after every fast reject has passed — keep it there, or the hot loop regresses.
+See [docs/core.md](docs/core.md).
 
-**Computing the letters is on the confirmed-match path only.** The `diff_letters`
-work in `compile_anagram` runs *after* all the fast reject checks pass, right
-before returning `Some(..)` — never for a word that fails to match. Keep it
-there: doing per-letter diffing for non-matches would regress the hot loop.
-Composition (`&`/`!`) folds each matched part's `MatchInfo` into the aggregate,
-but in practice only the single anagram part contributes anything.
+## Versioning: one number, in `[workspace.package]`
 
-**The CLI surfaces this behind `-d`/`--delta`** (off by default; applies to both
-one-shot and interactive mode). `format_delta` renders it as `-UNUSED +EXTRA`
-(ASCII, mirroring the GUI). Two rules matter:
+**To bump the version, edit `version` under `[workspace.package]` in the root
+`Cargo.toml`. That is the only place.** All four crates inherit it with
+`version.workspace = true`. In particular `tauri.conf.json` deliberately has
+**no** `version` field — don't "helpfully" add it back; that reintroduces a
+second source of truth. Android's `versionName`/`versionCode`, the container tag
+and release name, and the iOS bundle versions all chain off the crate version or
+the git tag. [docs/versioning.md](docs/versioning.md) has the full chain and the
+one path that still needs a hand edit.
 
-- **Color is delegated to `anstream`/`anstyle`, not hand-rolled.** The delta is a
-  `const anstyle::Style` (gray = `BrightBlack`); `render` always emits the escape
-  codes, and output is written through an `anstream::AutoStream` whose
-  `ColorChoice` is resolved once via `AutoStream::choice(&stdout)`. That honors tty
-  detection, `NO_COLOR`, `CLICOLOR`/`CLICOLOR_FORCE`, `TERM`, and CI — and strips
-  the codes itself when color isn't wanted, so piped output stays clean with no
-  manual `if color` plumbing. Don't reintroduce raw `\x1b[..]` constants.
-  (`anstyle`/`anstream` are already in the tree via `clap`'s `color` feature.)
-- **Column width must exclude the escape codes.** `MatchItem::width()` counts only
-  the visible word + delta (both ASCII, so `str::len()` == columns); the gray
-  codes are zero-width. Keep that split or columns misalign. The AutoStream is
-  backed by a `Vec<u8>` (not `BufWriter` — anstream's `RawStream` is sealed and
-  excludes `BufWriter`, but includes `Vec<u8>`), buffered then flushed once.
+## Front end: platform and transport are separate questions
 
-## GUI (`cha-gui`, Tauri v2)
+- **`platform` is the front end's only source of platform truth.** The command
+  returns `"desktop"`, `"mobile"` or `"web"` — those three strings are the only
+  values the front end understands. `init()` in
+  [`main.js`](cha-gui/ui/main.js) awaits it once at startup and drives every
+  gated behavior off it. **Don't** UA-sniff (iPadOS WKWebView reports
+  ambiguously) and **don't** infer platform from `@media (pointer: coarse)` —
+  that's a touch question, not a platform question.
+- **Transport is chosen separately**, in
+  [`transport.js`](cha-gui/ui/transport.js), by testing whether
+  `window.__TAURI__` is present in *this document*. A desktop browser hitting
+  `cha-web` has the HTTP transport and is not a phone; keep the two questions
+  apart. The HTTP shim must reject with a **bare string**, not an `Error`.
+- **Mobile and responsive CSS is additive by construction.** A rule that needs
+  `.mobile` in order to *avoid* breaking desktop is written wrong.
 
-- The GUI is a separate workspace member that reuses `cha-core`. The front end
-  is **vanilla HTML/JS/CSS with no bundler** — `withGlobalTauri: true` exposes
-  `window.__TAURI__.core.invoke`, so there is no Node/npm step. Don't introduce
-  a JS framework or build tool without a strong reason.
-- **The license page is generated output, and it is regenerated by hand.**
-  [`license.html`](cha-gui/ui/license.html) is what `cargo about` produces from
-  [`scripts/about.hbs`](scripts/about.hbs); `scripts/make-licenses.sh` is the
-  one-line command, and **the maintainer runs it manually** when the dependency
-  set changes. Do **not** wire it into `build.rs`, a CI job, or any other
-  automated step. Consequences for anyone editing it: `about.hbs` is the source
-  of truth, but the committed `license.html` is what actually ships, so a change
-  to the template must be **mirrored into `license.html` by hand** — the two are
-  byte-identical outside the `{{…}}` blocks, and a regeneration will overwrite
-  whatever is there. That includes the `<head>`: the page's `<style>`, its inline
-  `?platform=desktop` script, and Cha's own copyright/licence notice all live in
-  the mirrored region, so `diff <(head -100 scripts/about.hbs) <(head -100
-  cha-gui/ui/license.html)` should stay empty. Everything else about it is an ordinary UI file: it sits in
-  `cha-gui/ui/` and rides into every build the way `index.html` does (embedded by
-  `tauri-codegen` for desktop and mobile, by `include_dir!` for `cha-web`).
-- **How the license page is reached differs by platform, and the cross-links
-  between it and Pattern Syntax exist only where they're the *only* route.** On
-  mobile and web there is no menu bar, so the footer link at the bottom of
-  [`pattern-syntax.html`](cha-gui/ui/pattern-syntax.html) is the only way in and
-  the license page's `←&nbsp;Pattern Syntax` back link is the only way out —
-  both navigate the help sheet's iframe, where Back works but ✕ closes the whole
-  sheet. On desktop each page has its own Help menu entry and its own window
-  (Help → Pattern Syntax, Help → About Cha), so both links are redundant chrome
-  and are hidden there.
-- **Desktop hides them with a class, not a media query, and the class comes from
-  the backend.** `DESKTOP_QUERY` in
-  [`desktop.rs`](cha-gui/src-tauri/src/desktop.rs) appends `?platform=desktop`
-  when the desktop shell opens either page; a two-line inline `<script>` in the
-  `<head>` of each mirrors it onto `<html>`, and one CSS rule per page
-  (`html.desktop .footer`, `html.desktop .back`) does the hiding. Rationale, in
-  case this looks over-thought: a media query can't express it — a *desktop
-  browser* pointed at `cha-web` must still show the links, and no width/pointer
-  query separates that from the desktop app. Sniffing the user agent is
-  forbidden (see `transport.js`), and these two pages are static — no `invoke`,
-  no `transport.js`, no round trip — so the URL is how the backend's compiled
-  truth reaches them. It fails *open*: no query, no class, links visible, which
-  is what every non-desktop surface wants. Tauri strips the query before
-  resolving the asset (`ignore query string and fragment` in
-  `tauri::protocol::tauri`), so the page still loads normally. No preprocessing,
-  no build step, no new file — the whole mechanism is two lines of JS and a
-  display rule in each page.
-- **The word list is embedded via `include_str!` when `words.txt` is present at
-  the repo root at build time** (the usual case). `build.rs` gates the embed
-  behind a `words_embedded` cfg (it can't be a runtime `if` — `include_str!`
-  expands unconditionally — which is why the decision lives in `build.rs`).
-- **The dictionary is embedded + directory, deduped across both** (`load_dict`
-  in [`lib.rs`](cha-gui/src-tauri/src/lib.rs); the directory half —
-  `add_user_lists`/`load_dir_files` — is desktop-only and lives in
-  [`desktop.rs`](cha-gui/src-tauri/src/desktop.rs)). On startup the app (on
-  desktop) creates a `dictionaries/` subfolder of the app config dir
-  (e.g. `~/Library/Application Support/org.saturnvalley.cha/dictionaries`, or
-  `~/.config/…` on Linux), then loads *every* regular non-hidden file in it on
-  top of the embedded list — additive, not a replacement. Hidden files
-  (`.DS_Store`) are skipped so their binary contents don't inject junk words;
-  files load in sorted-name order; unreadable files are warned-and-skipped.
-  `cha_core::dictionary::WordListBuilder` does the cross-source trim/lowercase/
-  dedup. Files are read once at launch, so newly added lists need a reopen (the
-  notice says so).
-- **Word lists keep their provenance — matches are grouped and labeled by
-  source.** `WordListBuilder` is *group-aware*: `begin_source(name)` starts a new
-  named group and subsequent `add_str`/`add_file` calls append to it, while dedup
-  stays **global** (first-seen wins — a word appears only under the first list
-  that contained it, so built-in words never reappear under a custom list).
-  `finish_grouped()` returns the ordered `Vec<NamedWordList>` (empty groups
-  dropped); the old flat `finish()` still exists for the CLI and other callers,
-  so that path is unchanged. `load_dict` names the embedded list `"Built-in"` and
-  each file by its extension-stripped stem (`list_name` → `Path::file_stem`).
-  `Dict` holds `lists: Vec<NamedWordList>` in **display order** (built-in first,
-  then sorted files); ordering lives *only* here, so a future config step just
-  reorders this vec — nothing downstream assumes an order. `search` scans each
-  list in order and returns `SearchResult { groups: Vec<MatchGroup>, total,
-  list_count, note }` — one `MatchGroup { list, matches }` per list *with*
-  matches. The front end (`render` in [`main.js`](cha-gui/ui/main.js)) draws an
-  unobtrusive `.list-header` labeled rule before each group, but **only when
-  `list_count > 1`** — a single-list setup shows no headers and looks exactly as
-  it did before. This is the first step toward multiple selectable dictionaries.
-- **Opening the folder:** File → Open Dictionary Folder and the notice's
-  "Open Dictionary Folder" button both reach `open_dict_dir_impl`, which
-  `create_dir_all`s the folder then shells out to `open`/`explorer`/`xdg-open`
-  via `open_folder`. Spawning a subprocess is safe off the event-loop thread
-  (unlike window creation), so the front-end button can invoke the
-  `open_dict_dir` command directly. Custom commands need no capability entry.
-- **The empty-dictionary notice.** When *no* source yielded any words,
-  `dict_status` returns a user-facing message naming the `dictionaries/` path,
-  which the front end shows as a notice on startup (and disables input) so an
-  empty result area isn't mistaken for "no matches". On an embedded build this
-  never fires (embedded words are always present). The `search` command caps the
-  materialized rows at `MAX_RESULTS` (5000) *across all groups combined* but
-  keeps counting `total` truthfully through every list, so a pattern like `*`
-  can't flood the DOM. The front end's "showing first N of M" status sums the
-  rows it actually rendered.
-- **`time` is pinned to `=0.3.47`** in `cha-gui/src-tauri/Cargo.toml`. 0.3.48
-  trips an E0119 coherence false-positive (rust-lang/rust#100712) against
-  `cookie 0.18.1` under rustc 1.96; 0.3.47 still satisfies plist's `^0.3.47`.
-  Don't drop the pin (or let `cargo update` move it) until tauri/cookie or rustc
-  resolves it.
-- **`icons/icon.ico` needs its small entries, and the 32px one must come first.**
-  Tauri's requirement: *"The ico file must include layers for 16, 24, 32, 48, 64
-  and 256 pixels. For an optimal display of the ICO image in development, the 32px
-  layer should be the first layer."* The first-layer rule is real — Tauri's icon
-  codegen reads the *first* directory entry, so a 16px-first `.ico` hands it the
-  16px art. Ours carries 16, 20, 24, 32, 48, 64, 128, 256 with **32 first**; 20
-  and 128 are additions beyond the required set (20 covers 125% DPI).
-- **Symptom to recognize:** a jagged title bar with a *clean* taskbar means a
-  missing small layer, not a corrupt icon. The title bar asks for 16×16 (20/24 at
-  125%/150% DPI) and crude-shrinks the 32×32 when there's no exact match; the
-  taskbar asks for 32×32, finds it, and looks fine. That asymmetry is the tell.
-  This is how the icon shipped between 9872cf3 and 8522493: it was hand-packed
-  from the four PNGs sitting in `icons/` (32/64/128/256), so 16/24/48 were never
-  in it.
-- **`tauri icon` is not the enemy here** — it emits 16/24/32/48/64/256, 32 first,
-  and is the documented path. It's avoided for the *desktop* icons only because it
-  rewrites every PNG (and a fresh `icns`/`ico`, clobbering the hand-packed `.ico`)
-  and drops `Square*Logo.png`/`StoreLogo.png` into `icons/`, and it omits the 20px
-  layer. (The "drops `android/`+`ios/` into `icons/`" behavior is *conditional* —
-  it only happens when `gen/android`/`gen/apple` don't yet exist; once they do,
-  `tauri icon` writes the mobile icons straight into `gen/`, which is what we
-  want. See the mobile section for the scratch-dir recipe that gets mobile icons
-  without touching `icons/`.) If you regenerate the desktop icon by hand,
-  note **Pillow always writes the directory in ascending size order**
-  (`sorted(set(sizes))`), so the 32-first rule needs a post-pass that reorders the
-  16-byte directory entries — safe to do, since entries carry explicit offsets and
-  the image data doesn't move.
-- **`build.rs` must track `icons/icon.ico` explicitly.** The `.ico` is baked into
-  the exe's resources at build time, and `tauri_build` does *not* register it for
-  change detection. Worse, emitting *any* `rerun-if-changed` (this script emits
-  one for `words.txt`) makes that list exhaustive — cargo stops falling back to
-  "rerun if any file in the package changed". Without the explicit
-  `rerun-if-changed=icons/icon.ico`, editing the icon rebuilds **nothing**, not
-  even with a fresh mtime, and the exe silently keeps its old icon — which reads
-  as "my icon fix didn't work" when the real problem is that it was never
-  compiled in.
-- 茶 is close to illegible at 16px however it's resampled — thickening the strokes
-  before downscaling was tried and only made it blobbier. Real crispness needs a
-  hand-drawn 16×16 as its own entry.
-
-### Which thread runs what (Tauri v2)
-
-**Sync commands run on the main (event-loop) thread; `async` ones don't.** A plain
-`#[tauri::command] fn` executes inline on the event-loop thread, so a slow one
-freezes the window — no typing, no repaint — for as long as it runs. Marking it
-`#[tauri::command(async)]` (or making it an `async fn`) moves it to Tauri's worker
-pool. `search` scans the whole word list and **must** stay `(async)`; its body is
-still synchronous, so `(async)` here is purely a "run me off the main thread"
-switch, not a concurrency model. `State` works either way provided it's
-`Send + Sync` (`Dict` is).
-
-This one rule produces both GUI threading hazards, in opposite directions —
-slow work must go *off* the main thread (`search`), while window creation must
-stay *on* it (next section). A hand-rolled `async` command that calls `build()`
-violates the second, which is the likely origin of the Windows deadlock below.
-
-**Concurrent searches need a staleness guard.** Once `search` is `(async)`, two
-searches can be in flight at once and resolve out of order, letting a slow one
-clobber a newer one's results. `run()` in [`main.js`](cha-gui/ui/main.js) stamps
-each search with a monotonic `latestSearch` id and drops any result that isn't
-the newest, so the freshest query always wins and typing is never blocked. Keep
-that guard if you touch the debounce — the debounce alone does *not* prevent
-overlap, it only delays it.
-
-### Multiple windows and menus (Tauri v2, hard-won on Windows)
-
-The app has File → New Window (open another search window), Help → Pattern Syntax
-(a singleton static cheat-sheet window) and Help → About Cha (a singleton window
-showing `license.html`). This is **desktop-only** — it all
-lives in [`desktop.rs`](cha-gui/src-tauri/src/desktop.rs) behind the
-`#[cfg(desktop)]` module (see the mobile section). Getting it working
-cross-platform surfaced several non-obvious traps — in
-[`desktop.rs`](cha-gui/src-tauri/src/desktop.rs), [`main.js`](cha-gui/ui/main.js),
-and the [`capabilities/`](cha-gui/src-tauri/capabilities/) files:
-
-- **Create windows only on the event-loop (main) thread.** `WebviewWindowBuilder::build()`
-  off the main thread on Windows half-creates a blank window and then deadlocks the
-  whole app. Note that *`async`* command handlers (and only those — see the previous
-  section) run off the event-loop thread, so building a window from one is the way
-  into this trap.
-  `run_on_main_thread` from inside a command did **not** reliably break this.
-  Two patterns that *do* work: (a) from Rust, build windows only in event-loop
-  callbacks like `on_menu_event` (where `open_search_window` /
-  `open_pattern_syntax_window` are called); (b) from the front end, use the JS
-  `new WebviewWindow(label, opts)` API (`window.__TAURI__.webviewWindow`), which
-  lets Tauri schedule creation on the event loop for you. Do **not** hand-roll an
-  `invoke("new_window")` → `build()` command.
-
-- **Menu accelerators don't fire on Windows when the webview has focus.** WebView2
-  swallows the keystroke before the native accelerator table sees it. Standard
-  editing keys (Ctrl+C/V/X/A/Z) still work anyway because WebView2 implements
-  them *itself* — independent of the menu — but a custom accelerator like Ctrl+N
-  just evaporates. Fix: bind it in a JS `keydown` handler. Gate that handler to
-  **non-macOS** (`navigator.platform`): on macOS the native menu consumes Cmd+N
-  before the webview sees it, so a JS handler there would open two windows. Keep
-  the `.accelerator("CmdOrCtrl+N")` on the menu item regardless — it drives the
-  macOS behavior and shows the shortcut hint everywhere.
-
-- **The capability `windows` list must glob to match runtime windows.** Each new
-  window gets a unique label (`main-2…` from Rust, `main-<timestamp>` from JS), so
-  `default.json` scopes to `["main", "main-*", "pattern-syntax", "about"]`. Without the
-  glob, a new window's `invoke()` calls are silently blocked. Creating a window
-  *from the front end* additionally needs the
-  `core:webview:allow-create-webview-window` permission — which lives in a
-  separate `capabilities/desktop.json` scoped `"platforms": ["macOS", "windows",
-  "linux"]`, so mobile (which has no multiwindow) never grants it. A capability
-  whose `platforms` excludes the target is silently filtered out, not an error;
-  the platform names are case-sensitive (`"macOS"`, `"iOS"`).
-
-- **The macOS app menu is macOS-only.** `build_menu` gates the App submenu
-  (About/Services/Hide/Quit) behind `#[cfg(target_os = "macos")]`; on Windows/Linux
-  it's not idiomatic, so Quit moves under File there. Wire the menu via
-  `Builder::menu(build_menu)` (which takes `&AppHandle`), **not**
-  `App::set_menu` in `setup` — the former registers the accelerator table on the
-  initial window at creation. Standard items are `PredefinedMenuItem`s (Tauri
-  owns their labels/localization); New Window, Pattern Syntax and About Cha are
-  custom. Note that **this branch is invisible to a Linux/Windows `cargo
-  clippy`**, the same way the mobile paths are — if you edit the App submenu,
-  build on a Mac (or expect CI to be the first thing that tells you).
-
-- **About is our window, not the system panel, and it sits where the platform
-  puts it.** On macOS it's the first item of the app menu (replacing
-  `PredefinedMenuItem::about`) and is *not* repeated under Help; on
-  Windows/Linux, which have no app menu, Help is its only home. So the item is
-  built in one of two places behind `#[cfg(target_os = "macos")]` — the same
-  split Quit already uses — and carries the id `"about"` either way, so one
-  `on_menu_event` arm serves it. Using the predefined item on macOS instead
-  would mean "About Cha" opens the system panel there and our window
-  everywhere else.
-
-- **The About window is not modal, and Tauri 2.11 can't make it one.** There is
-  no modal API. `WebviewWindowBuilder::parent` is the nearest thing and it isn't
-  modality — it's "owned window" on Windows, `addChildWindow` on macOS,
-  `set_transient_for` on Linux, none of which block input to the opener. It
-  would also be wrong here: About is a singleton shared by every search window,
-  and on Windows an owned window is destroyed with (and hidden alongside) its
-  owner, so it would die with whichever window happened to open it.
-
-- **Singleton windows:** re-opening Pattern Syntax or About focuses the existing
-  window via `get_webview_window("pattern-syntax")` / `("about")` + `set_focus()`
-  instead of stacking duplicates. `AppHandle::clone()` is cheap (an `Arc` bump) —
-  clone freely to move a handle into a `'static` closure.
-
-## Web (`cha-web`, axum)
-
-`cha-web` serves the same engine and the same front end over HTTP, as a single
-binary. Run it with `cargo run -p cha-web`; `--dict-dir DIR` adds server-side
-word lists, `--ui-dir cha-gui/ui` serves the front end from disk so you can edit
-and reload without a rebuild.
-
-- **The front end is `cha-gui/ui/` verbatim, embedded — not copied.** `include_dir!`
-  pulls it straight out of the GUI crate at compile time. There is exactly one
-  copy of the UI in the repo; if you find yourself duplicating a file, stop.
-  Deliberately **not** `rust-embed`, which reads from disk in debug builds unless
-  `debug-embed` is set — a debug-built server deployed anywhere would silently
-  404 every asset. `build.rs` lists each UI file in `rerun-if-changed`, because
-  emitting any such line makes the list exhaustive; **add a line there when you
-  add a UI file**, or edits to it won't trigger a rebuild.
-- **`spawn_blocking` around the scan is mandatory.** It's CPU-bound for
-  milliseconds to seconds, and on an async worker it stalls every other
-  connection sharing that thread. This is the same rule as
-  `#[tauri::command(async)]` in the GUI, one layer down, with worse symptoms.
-  Verified by loading the box with 12 concurrent 2M-word searches and confirming
-  static assets still served in 0.2–2.9 ms.
-- **A dictionary-less server exits at startup**, unlike the desktop app, which
-  degrades to a notice with an "Open Dictionary Folder" button. A user sitting at
-  a desktop can fix it; a server operator is elsewhere and wants to know at
-  deploy time. `dict_status` therefore always returns `null` on web.
-- **`--bind` defaults to `127.0.0.1`.** Exposing the server should be a
-  deliberate act, not the result of a forgotten flag.
-- **`max_results` is 500 on web, vs 5000 in the app.** The binding cost inverts:
-  the app's cap protects the DOM, the server's protects the wire (5000 rows is
-  ~250 KB of JSON). `total` is still counted truthfully, so "showing first N of
-  M" stays honest.
-
-### The threat model is private/LAN, and that's a decision — not an oversight
-
-The guards below exist because a *typo* can wedge the process; they are not an
-adversary story. There is deliberately **no rate limiting, no authentication, and
-no TLS**. Putting this on the public internet needs a reverse proxy and a fresh
-look at every number here.
-
-| Guard | Value | Where |
-|---|---|---|
-| Body size | 8 KB | `DefaultBodyLimit` on the `/api` router |
-| Pattern length | 64 | `Limits`, via `web_limits()` |
-| Anagram combos | 4096 | `Limits` — see the `Limits` section |
-| Regex backtracking | 10_000 | `Limits`, per candidate word |
-| Fuzzy steps | 10_000 | `Limits`, per candidate word |
-| Scan deadline | 2 s | `Limits::deadline`, per 4096-word chunk |
-| Concurrency | CPU count | `Semaphore::try_acquire_owned` → 503 |
-| CSP | `'self'` | `SetResponseHeaderLayer` |
-
-Two of those choices are easy to get wrong:
-
-- **`try_acquire_owned`, not a queue.** `tower`'s `ConcurrencyLimitLayer` queues,
-  and an unbounded queue under overload just converts it into unbounded latency
-  and memory. A fast 503 lets a client back off. The permit is moved *into* the
-  blocking task so it covers the whole scan.
-- **The semaphore is on the search handler only**, so `/api/platform` and asset
-  serving stay responsive while the CPU is saturated.
-
-`tauri.conf.json` sets `"csp": null`, which is fine for a local webview and not
-for an HTTP origin. The front end has no inline scripts or styles, so `'self'`
-fits with no source changes — keep it that way.
-
-Note axum's own extractors (body limit, JSON parse) reject with **plain text**,
-not the `{"error": ...}` envelope `ApiError` produces. That's fine — `transport.js`
-falls back to the raw body — but don't assume every error response is JSON.
-
-### Deployment (`deploy/`)
-
-`deploy/` holds the Dockerfile, a compose example, and Caddy + nginx snippets;
-`deploy/README.md` is the operator-facing doc. The release workflow publishes
-`ghcr.io/<owner>/cha-web` for amd64 and arm64 on every `v*` tag.
-
-- **The image ships no dictionary, and that's enforced explicitly.**
-  `CHA_NO_EMBED_WORDS=1` in the Dockerfile makes `build.rs` skip the embed
-  regardless of whether `words.txt` is in the build context. Don't "simplify"
-  this to just not COPYing words.txt: then whether the image has a dictionary
-  depends on an invisible property of the build context, and a missing volume
-  mount would be silently masked by a baked-in list. Local `cargo run -p cha-web`
-  still embeds, so dev stays zero-config.
-- **The Docker build context is the repo root**, not `deploy/`. `cha-web` embeds
-  `cha-gui/ui` via `include_dir!`, so the front end must be in context.
-- **The image cross-compiles; it does not emulate.** The builder stage is pinned
-  to `--platform=$BUILDPLATFORM` and targets `TARGETARCH`, so arm64 is built
-  natively on an amd64 runner instead of under QEMU — minutes instead of tens of
-  minutes, since rustc is exactly the workload emulation handles worst. **This is
-  cheap only because cha-web's tree is pure Rust**: no `-sys` crates, no `cc`, no
-  build scripts but cha-web's own. Before adding a dependency with C in it, check
-  `cargo tree -p cha-web -e build | grep -iE '\bcc v|cmake|bindgen'`; if that
-  finds something, the stage needs a full cross C toolchain plus `CC_<triple>` /
-  `AR_<triple>` wiring, and reverting to QEMU may be the better trade. Don't add
-  `setup-qemu-action` back to the workflow — the Dockerfile never asks to be
-  emulated, so it would silently do nothing.
-- **The stub-source layer is a real cache, not decoration.** `cargo build -p
-  cha-web` compiles every dependency cha-web *declares*, not just what the stub
-  source references, so ~87 crates build in a layer that only invalidates when a
-  manifest or the lockfile changes; the real-source layer then rebuilds just
-  cha-core and cha-web. Verified end to end.
-- **`cha-gui/src-tauri/Cargo.toml` is copied into the build but never built.**
-  The workspace manifest lists it as a member, so it must exist for the manifest
-  to parse; only `-p cha-web` is built. The stub-source dance in the first stage
-  exists so the dependency fetch caches independently of source edits — if you
-  add a workspace member, add its manifest and a stub there too or the build
-  breaks at the `cargo fetch` layer.
-- **`CHA_BIND=0.0.0.0` in the image is correct** and is not a weakening of the
-  binary's loopback default. Inside a container the network namespace decides
-  reachability; binding loopback there makes the server unreachable even from the
-  host.
-- **Every flag has an `env` var** (`CHA_PORT`, `CHA_DICT_DIR`, …) so a compose
-  file configures it without a custom command line. Add both when adding a flag.
-- **`--health-check` probes `/healthz` over loopback and exits 0/1**, so the
-  runtime image needs no curl or wget. `/healthz` is routed outside the `/api`
-  router deliberately: it must not sit behind the search semaphore, or a busy
-  server reports unhealthy exactly when it's under load and gets restarted.
-- **SIGTERM is handled** (`with_graceful_shutdown`), so `docker stop` exits
-  promptly instead of waiting out its 10s timeout before SIGKILL. Measured at
-  ~60 ms.
-- **Serve at the root of a host, not a subpath.** The front end fetches `/api/…`
-  absolutely, so `example.com/cha/` breaks. Making that work means relative API
-  paths and a trailing-slash footgun; not worth it until someone needs it.
-- **Don't set a CSP at the proxy.** cha-web sets its own, and multiple CSP
-  headers intersect rather than override — the failure mode is a blank page.
-
-### Adding a command
+## Adding a command
 
 A command must be added in **both** backends or the front end breaks on one
 transport: `generate_handler!` in [`lib.rs`](cha-gui/src-tauri/src/lib.rs) and a
@@ -700,408 +200,6 @@ transport: `generate_handler!` in [`lib.rs`](cha-gui/src-tauri/src/lib.rs) and a
 what `main.js` passes. Beware that Tauri camelCases snake_case argument names on
 the JS side, so a two-word argument needs `#[serde(rename)]` on the web struct to
 keep the two transports speaking one protocol. No current argument has two words.
-
-## Mobile (iOS + Android, Tauri v2)
-
-The same crate and the same `cha-gui/ui` front end ship to five platforms. Mobile
-is deliberately stripped down: **embedded dictionary only** (no config dir, no
-"Open Dictionary Folder"), **no multiwindow**, and the pattern-syntax cheat sheet
-reached through an in-page sheet instead of a menu. Desktop rendering and behavior
-are unchanged — every mobile addition is behind a cfg seam, a `.mobile` body
-class, or a CSS rule that is a literal no-op on desktop.
-
-- **The lib/bin split.** `run()` in [`lib.rs`](cha-gui/src-tauri/src/lib.rs) is
-  the single entry point for all platforms — the desktop
-  [`main.rs`](cha-gui/src-tauri/src/main.rs) is a 5-line shim that only holds
-  `windows_subsystem` (a bin-crate attribute) and calls `cha_gui_lib::run()`; on
-  mobile the platform shell calls `run()` via `#[cfg_attr(mobile,
-  tauri::mobile_entry_point)]`. `Cargo.toml` has `[lib] name = "cha_gui_lib"`
-  with `crate-type = ["staticlib", "cdylib", "rlib"]` — staticlib for iOS, cdylib
-  for Android, rlib for the desktop bin. The `_lib` suffix avoids a Windows
-  bin/lib artifact collision (cargo#8519), and this repo ships Windows, so keep
-  it. `crate-type` can't be cfg-gated (hence `--bins` for a fast desktop build).
-- **`#[cfg(desktop)] mod desktop;` is the one seam.** Everything mobile doesn't
-  have — the menu bar, extra windows, the Pattern Syntax window, the config-dir
-  dictionary, the file-manager shell-out — lives in
-  [`desktop.rs`](cha-gui/src-tauri/src/desktop.rs). Because the module isn't
-  compiled on mobile, nothing in it can be dead code there; because it's all
-  reachable on desktop, nothing is dead there either. **Neither platform needs a
-  single `#[allow(dead_code)]`.** A new desktop-only feature goes *in that
-  module*, not behind a fresh inline `#[cfg]` in `lib.rs`. The only unavoidable
-  straddler is `load_dict`, whose two `#[cfg]` lines are commented as such.
-- **`generate_handler![]` takes per-entry `#[cfg]`.** The mobile handler list
-  omits `desktop::open_dict_dir` via `#[cfg(desktop)]` right inside the macro
-  (tauri-macros re-emits the attr onto the generated match arm). This keeps one
-  handler list instead of two divergent copies. If it ever breaks, the fallback
-  is two `#[cfg]`'d `.invoke_handler(...)` calls.
-- **`platform` is the front end's only source of platform truth.** Its body is
-  `if cfg!(mobile) { "mobile" } else { "desktop" }` — an *expression*, so one
-  command serves both platforms — and `cha-web` returns `"web"` from its own
-  handler. Those three strings are the only values the front end understands. It
-  returns a string rather than the old `is_mobile` boolean because web wants the
-  mobile help affordance (a browser tab has no menu bar we control) while not
-  being mobile, which a boolean can't express. The front end (`init()` in
-  [`main.js`](cha-gui/ui/main.js)) awaits it once at startup and drives the help
-  button, the Ctrl+N handler, the submission model, and the
-  "Open Dictionary Folder" gate off it. **Don't** UA-sniff (iPadOS WKWebView
-  reports ambiguously) and **don't** infer platform from
-  `@media (pointer: coarse)` (a touch laptop matches it — that's a touch
-  question, not a platform question). Also note the
-  `window.__TAURI__.webviewWindow` destructure lives *inside* the desktop branch,
-  not at top level, so a mobile bundle that omits it can't throw and kill the
-  whole script.
-- **The help sheet's iframe must be navigated with `location.replace`, never by
-  assigning `src`.** Assigning `src` commits asynchronously and adds an entry to
-  the *joint session history*, which lands after `openHelp`'s `pushState` (that
-  runs synchronously on the same tick). `closeHelp`'s `history.back()` then
-  returns to the entry where the iframe was still `about:blank`, so the sheet is
-  blank on every subsequent open until a full page reload. `replace()`
-  contributes no history entry, which removes the ordering problem rather than
-  racing it. Confirmed in headless Firefox — with `src` the iframe reads
-  `about:blank` immediately after the first close; with `replace` it keeps its
-  content across open/close/open. `openHelp` navigates on *every* open rather
-  than caching a "already loaded" flag: the sheet is two pages now (the cheat
-  sheet's footer links to `license.html`) and the iframe stays parked wherever
-  the user left it, so without the re-navigation the ? button would sometimes
-  open the licenses. Keep using `replace` for that — assigning `src` puts the
-  bug above straight back.
-- **Transport is chosen separately from platform, and the distinction matters.**
-  [`transport.js`](cha-gui/ui/transport.js) sets `window.chaInvoke` to either
-  Tauri's `invoke` or an HTTP `POST /api/<command>`, deciding by testing for
-  `window.__TAURI__`. That looks like the UA-sniffing the rule above forbids and
-  isn't: it asks "is the IPC bridge present in *this document*", a directly
-  observable fact about how the page loaded, not a guess about the machine. The
-  two questions are genuinely independent — a desktop browser hitting `cha-web`
-  has the HTTP transport and is not a phone. Keep them separate.
-  The shim must reject with a **bare string**, not an `Error`: Tauri rejects with
-  the command's `Err` value and `main.js` renders failures via `String(e)`, so an
-  `Error` would render as "Error: msg" on web only. That contract is pinned by
-  [`ui/tests/`](cha-gui/ui/tests/) — run `cha-gui/ui/tests/run.sh`. It uses
-  whatever JS engine is around (macOS ships JavaScriptCore; node works too) and
-  **skips with exit 0 when neither is present**, so it can never fail a build. No
-  CI job invokes it today; run it by hand when touching `transport.js`.
-- **Mobile is embedded-only by construction, and that's enforced, not hoped.**
-  `build.rs` hard-errors on an `android`/`ios` target with no `words.txt` (via
-  `CARGO_CFG_TARGET_OS`). On mobile `dict_status` therefore can't return a
-  message (the embedded list is always non-empty), so the empty-dictionary notice
-  is unreachable there. The notice's "Open Dictionary Folder" button is
-  nonetheless **explicitly gated on `platform === "desktop"`** now, rather than
-  relying on that unreachability: `open_dict_dir` is a `#[cfg(desktop)]` command,
-  and on web the notice *is* reachable in principle while the dictionary lives on
-  a server the user can't browse. Adding user lists on mobile would need a
-  file-picker plugin and a real design — don't half-do it.
-- **Mobile CSS is additive by construction.** In
-  [`styles.css`](cha-gui/ui/styles.css), `env(safe-area-inset-*)` is `0px` and
-  `100dvh == 100vh` on desktop, so the safe-area/viewport rules ship
-  unconditionally and cost desktop nothing — no class, no cfg, no first-paint
-  flash. `init()` sets the platform name as a body class (`desktop` / `mobile` /
-  `web`) and `platform` gates only real behavior (the help button, the Ctrl+N
-  handler, the submission model). Keep it that way: a rule that needs `.mobile`
-  to *avoid* breaking desktop is written wrong. The one class-scoped rule today
-  is `body.web`'s `max-width`, which exists because a browser window is far wider
-  than the app's 720px — additive, and invisible to the two app targets. `viewport-fit=cover` on the viewport
-  meta is required for the insets to be non-zero and is a desktop no-op.
-- **`#pattern` must stay ≥16px** (it's 18px). iOS zooms the page when a focused
-  `<input>` is under 16px, and the zoom doesn't cleanly undo. This looks like a
-  harmless tidy-up and isn't.
-- **Result rows (`.word`) are deliberately not touch targets.** They're
-  non-interactive text; 44px rows would cost ~45% of the visible words for no
-  gain. The only 44px targets are `#help`/`#help-close`. If rows ever become
-  tappable (copy-on-tap), *that's* when the sizing question opens.
-- **Pattern help on mobile reuses the desktop file verbatim.** The `?` button
-  opens [`pattern-syntax.html`](cha-gui/ui/pattern-syntax.html) — the very page
-  the desktop Help menu opens in a window — inside a full-screen `<iframe>` sheet
-  (`#help-sheet`). It's pure static HTML with no JS/Tauri, so it drops into the
-  iframe unmodified: one source of truth, zero duplication. The sheet container
-  carries the safe-area padding because an iframe can't see its parent's `env()`
-  insets. `openHelp` pushes a history entry so Android's hardware **Back closes
-  the sheet, not the app** (verified on the emulator); ✕ and Escape also close it.
-  The cheat sheet's footer link to `license.html` navigates *inside* the iframe,
-  which adds a nested history entry — so from the license page Back returns to
-  the cheat sheet first and only then closes the sheet. Reopening always starts
-  at the cheat sheet regardless of where the user left off (see the
-  `location.replace` note above).
-- **`gen/schemas/` is git-ignored; `gen/android` and `gen/apple` are committed.**
-  Only the ACL schemas regenerate per build; the Xcode and Gradle projects from
-  `tauri {ios,android} init` are one-shot and hold the Kotlin activity, plists,
-  and mobile icons — `android init` isn't reproducible enough to regenerate on a
-  clean checkout. **Never `rm -rf gen/`.** The generated trees carry their own
-  `.gitignore`s for build outputs (`build/`, `.gradle/`, `Pods/`, `Externals/`,
-  `local.properties`, `jniLibs/**/*.so`); sanity-check `git status` after an init.
-- **Mobile icons: the scratch-dir recipe, never `tauri icon` in place.** In-place
-  it would clobber the hand-packed `icons/icon.ico` (and `build.rs` tracks that by
-  mtime, so a touch-and-revert triggers a misleading rebuild). Instead, source the
-  true 1024px master out of the icns and send everything to a scratch dir, then
-  copy only the mobile outputs:
-  ```
-  iconutil -c iconset icons/icon.icns -o "$S/cha.iconset"
-  cargo tauri icon "$S/cha.iconset/icon_512x512@2x.png" -o "$S/out"
-  cp "$S/out/ios/"*.png gen/apple/Assets.xcassets/AppIcon.appiconset/   # keep the generated Contents.json
-  rsync -a "$S/out/android/" gen/android/app/src/main/res/
-  ```
-  This can't damage `icons/` even if you forget the follow-up. Note the Android
-  **adaptive** foreground is derived from the square icon and Android masks/crops
-  ~25% off the edges, so 茶 loses its outer strokes — the mechanical output is a
-  starting point; a proper foreground (respecting the 66/108 safe zone, via
-  `tauri icon --android_fg/--android_bg`) wants a hand pass.
-
-### Mobile toolchain and driving a device
-
-One-time setup on macOS: Xcode + `brew install cocoapods xcodegen`; Android Studio
-or `brew install --cask android-commandlinetools` plus `sdkmanager` for
-`platform-tools`, `platforms;android-34`, `build-tools;34.0.0`, and an `ndk;…`;
-JDK 17 or 21 (**not** 24 — Android Gradle rejects it); `rustup target add` the 3
-iOS + 4 Android targets. Export `ANDROID_HOME`, `NDK_HOME`, and a JDK-21
-`JAVA_HOME`. `tauri android init` reads `[lib]` from `Cargo.toml`, so do the
-lib/bin split first.
-
-```
-cargo tauri ios dev "iPhone 17"           # simulator; --release to judge feel
-cargo tauri android build --debug --apk --target aarch64   # then adb install/monkey
-```
-
-A freshly-booted Android emulator under heavy host load throws "Process system
-isn't responding" (that's the emulator's own system_server, not the app); free
-CPU and relaunch with `am start -n org.saturnvalley.cha/.MainActivity`. `eprintln!`
-(which the code already uses) lands in `adb logcat` / `xcrun simctl … log stream`,
-so it's the zero-dependency way to time `load_dict` if a phone ever shows a blank
-startup stall — currently it doesn't, so the parse stays inline in `setup()` and
-`dict_status` stays sync. If that changes, moving the parse off-thread means
-`dict_status` must become `(async)` too, or it blocks the event loop.
-
-### Test deployment to a real device
-
-**The two platforms are not symmetric.** Android lets you build a self-signed APK
-and hand it to anyone. iOS binds every install to signing that authorizes a
-specific device or an App Store channel — there is no sideload-an-`.ipa`
-equivalent, and remote testing effectively requires the paid Apple Developer
-Program ($99/yr).
-
-**iOS, cabled local device (free, no paid account, your own phone only).** Good
-for a quick real-device smoke test. A free "Personal Team" signs apps that run
-only on a device cabled to (or paired with) your Mac, expire after 7 days, and
-can't use most entitlements — Cha needs none, so it's fine.
-1. Plug in the iPhone, unlock, tap **Trust This Computer**, enter the passcode.
-2. `cargo tauri ios open` → Xcode → target → **Signing & Capabilities** → check
-   *Automatically manage signing* → **Team** → *Add an Account* (your Apple ID) →
-   pick the Personal Team. Xcode writes `DEVELOPMENT_TEAM` into the **pbxproj**,
-   which XcodeGen *regenerates from `project.yml`* on the next `cargo tauri ios`
-   command — so that edit isn't durable and would also commit your personal team
-   id. Move the value instead into **`Signing.local.xcconfig` at the repo root**
-   (git-ignored) as `DEVELOPMENT_TEAM = XXXXXXXXXX`. `gen/apple/Signing.xcconfig`
-   (committed, carrying no id) `#include?`s it by a relative `../../../../` climb
-   to the root, and `project.yml` references that xcconfig — so the team survives
-   regeneration, never lands in git, and a clone without the local file still
-   builds for the Simulator (which needs no signing). It's kept at the root, not
-   beside `Signing.xcconfig`, so it's visible and hard to lose; the four `../`
-   must stay in sync with `gen/apple`'s depth if the project layout moves.
-3. On the phone, enable **Developer Mode**: Settings → Privacy & Security →
-   Developer Mode → on → restart. (Required on iOS 16+ to run dev-signed apps;
-   the toggle only appears after a dev build has been targeted at the device.)
-4. `cargo tauri ios dev "<iPhone name>"` (it lists connected devices). First launch
-   may need Settings → General → VPN & Device Management → *Developer App* → Trust.
-5. Re-run to refresh before the 7-day signature expires.
-
-**iOS, building from Xcode's GUI.** Xcode launched from the Dock/Finder runs
-with a minimal launchd `PATH` that lacks `~/.cargo/bin`, so the "Build Rust Code"
-phase fails with *"Cargo: command not found"* — even though `cargo tauri ios …`
-works in a terminal (whose shell `PATH` has it). The fix lives in
-`gen/apple/project.yml`'s `preBuildScripts`, which prepends
-`export PATH="$HOME/.cargo/bin:$PATH"` before calling `cargo tauri ios
-xcode-script`. Keep it there (XcodeGen bakes it into the pbxproj on regeneration);
-without it, only terminal builds work. For a standalone on-device build that
-survives unplugging, prefer `cargo tauri ios dev --release --no-watch "<device>"`
-— it installs a release build directly and sidesteps `ios run`'s broken
-IPA-export step (`Couldn't load -exportOptionsPlist … no such file`).
-
-**iOS, remote tester → TestFlight (paid).** The normal path is CI: run the
-**iOS TestFlight** workflow from the Actions tab (manual trigger only; see
-"Release signing and mobile CI" below for the one-time Apple setup and the
-secrets). It archives, signs, exports, and uploads; uncheck `upload` to get just
-the IPA as an artifact. You do **not** need to bump the version to re-upload — the
-build number comes from the run number, and only the `(version, build)` pair has
-to be unique.
-
-Adding testers is still web-UI work in App Store Connect: **internal** testers
-must be members of your ASC team but need no review and appear immediately;
-**external** testers can be any email address (or a public link, up to 10,000),
-but the first build sent to an external group goes through a one-time Beta App
-Review. Builds expire after 90 days. Export compliance is pre-answered by
-`ITSAppUsesNonExemptEncryption=false` in `Info.plist`, so builds don't park in
-"Missing Compliance" — the app is fully offline and that answer stays true only
-as long as it is.
-
-The manual fallback, if CI is broken or you want to watch it happen: `cargo tauri
-ios open`, then Product → Archive → Distribute → TestFlight in the Xcode
-Organizer. `gen/apple/ExportOptions.plist` starts as `method: debugging` and is
-rewritten by `cargo tauri ios build --export-method` — don't hand-edit it, and
-note the CI workflow deliberately ignores it and writes its own into `RUNNER_TEMP`.
-**On this path you must set the version by hand**: a local archive reads the
-`MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` literals in `project.pbxproj`,
-which CI normally overrides and which nothing keeps current. Left alone they
-produce a stale marketing version and a build number of `1`, which App Store
-Connect rejects as a duplicate. Bump both in the Xcode target's build settings
-before archiving (and don't commit the bumped build number — it's a CI counter).
-
-**iOS, TestFlight → App Store.** No rebuild and no CI change: TestFlight builds
-*are* App Store builds. In App Store Connect, create the version, pick an already-
-uploaded build, and submit. What's missing is listing material — screenshots
-(iPhone 6.9" **and** 13" iPad, because `TARGETED_DEVICE_FAMILY = "1,2"`), the
-privacy questionnaire ("Data Not Collected" — the app has no network), a live
-privacy-policy URL, age rating, and category. Full App Review, not the beta kind.
-Guideline 4.2 (minimum functionality) is the realistic risk for a single-purpose
-utility, which is why the shipped build must carry the full `words.txt`.
-
-**Android, remote tester → signed APK.** Release signing is wired into the build
-(see the next section), so `cargo tauri android build --apk` emits a *signed*,
-installable release APK directly — the output is
-`gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk`.
-`adb install` it or send the file. **Updates must keep the same signing key and a
-higher `versionCode`** (crate-version-derived, in the git-ignored
-`gen/android/app/tauri.properties`), or Android refuses the install. Scaling past
-one tester is Play Console internal testing, which wants the **AAB** (`--aab`).
-
-### Release signing and mobile CI
-
-**Android signing lives in Gradle, driven by a git-ignored properties file.**
-[`gen/android/app/build.gradle.kts`](cha-gui/src-tauri/gen/android/app/build.gradle.kts)
-has a `signingConfigs { create("release") { … } }` block (added by hand — this
-file is generated once and then owned by us, *unlike* the iOS pbxproj) that reads
-`rootProject.file("keystore.properties")`. Tauri's convention uses a **single
-`password`** for both the store and the key, plus `keyAlias` and `storeFile` —
-not separate store/key passwords. The casts are nullable (`as String?`) and
-`storeFile` is guarded, so a build with **no** `keystore.properties` (a plain
-debug build, or a fresh clone) still works instead of throwing; only release
-signing goes unpopulated.
-- `gen/android/keystore.properties` is **git-ignored** (by `gen/android/.gitignore`)
-  and holds `password`/`keyAlias=upload`/`storeFile=<abs path>`. The `.jks` lives
-  **outside the repo** (`~/keystores/cha-upload.jks`); never commit either.
-- **Generate the key once:** `keytool -genkeypair -v -keystore
-  ~/keystores/cha-upload.jks -keyalg RSA -keysize 2048 -validity 10000 -alias
-  upload`. The DN fields (CN/OU/O/…) are cosmetic — Android/Play validate only the
-  key's algorithm, validity, and cross-update consistency, never the DN text.
-  **Losing the password or the `.jks` means you can never update the app** for
-  existing installs. Verify a build with
-  `build-tools/…/apksigner verify --print-certs <apk>`.
-- **The real release risk is R8, not signing.** `release` has
-  `isMinifyEnabled = true`; a signed APK that *builds* can still crash if proguard
-  strips Tauri/webview classes. Always install-and-run the release APK, don't just
-  build it. (Verified clean with the current Tauri proguard rules.)
-
-**Mobile CI is [`.github/workflows/mobile.yml`](.github/workflows/mobile.yml)**,
-separate from the desktop `release.yml`. `workflow_dispatch` build-checks both
-platforms and uploads artifacts; a `mobile-v*` tag additionally attaches the
-signed Android APK + AAB to a (draft) GitHub release.
-- **Android job** (`ubuntu-latest`): setup-java 17 → setup-android → `sdkmanager
-  "ndk;<NDK_VERSION>"` → rust-toolchain with the 4 android targets → cargo-binstall
-  tauri-cli → decode `ANDROID_KEYSTORE_BASE64` + write `keystore.properties` from
-  secrets → `cargo tauri android build --apk --aab`.
-- **iOS job** (`macos-latest`): **build-check only** — `cargo build -p cha-gui
-  --lib --target aarch64-apple-ios` cross-compiles the shared library with **no
-  Xcode archive, no signing, no secrets**, so this workflow stays runnable by
-  anyone with a clone. `cargo tauri ios build` was tried here first but it always
-  *archives* (device), which needs a signing team — so it fails on a runner
-  without one, and only "worked" locally because this Mac has a cert. The
-  cross-compile catches the breakage that matters (the shared Rust code building
-  for iOS), is arch-agnostic, and needs macOS only because the iOS SDK is
-  Xcode-only. **Signed iOS distribution is a separate workflow** (below), kept
-  apart so an Android run never depends on Apple secrets.
-- **`words.txt` in CI:** nothing to do. It's committed, freely redistributable,
-  and `actions/checkout` puts it at the repo root where `build.rs` looks. The old
-  `WORDS_URL`-or-`ci/words-stub.txt` "materialize" step is **gone** — it existed
-  when the list was git-ignored, and once the list was committed it actively
-  overwrote the real dictionary with a 2k-word placeholder.
-- **Secrets to add now** (repo Settings → Secrets and variables → Actions):
-  `ANDROID_KEYSTORE_BASE64` (`base64 -i ~/keystores/cha-upload.jks | pbcopy`),
-  `ANDROID_KEY_PASSWORD`, `ANDROID_KEY_ALIAS` (=`upload`). The Android job hard-fails
-  fast if `ANDROID_KEYSTORE_BASE64` is missing rather than shipping an unsigned APK.
-
-**iOS release signing is
-[`.github/workflows/ios-testflight.yml`](.github/workflows/ios-testflight.yml)**,
-`workflow_dispatch` only — no tag trigger, no push trigger. It's the one workflow
-that holds the distribution certificate, and a stray run burns a build number.
-Inputs: `upload` (default on; uncheck to stop after the IPA artifact) and
-`build_number` (default: the run number).
-
-- **Manual signing, not automatic.** The job imports an `Apple Distribution`
-  `.p12` into a throwaway keychain and installs a downloaded App Store
-  provisioning profile; nothing calls out to Apple at build time, so a build
-  can't silently mint a new profile or burn one of the three cert slots. It reads
-  the profile's **`Name` out of the profile itself** rather than taking it as a
-  secret — one less thing to keep in sync at the yearly renewal.
-- **Signing settings go on the `xcodebuild` command line**, not in
-  `Signing.xcconfig`. `project.pbxproj` sets `CODE_SIGN_IDENTITY` in the
-  *target's* build settings, which outranks the xcconfig attached to that same
-  target; command-line settings outrank everything. That's also how
-  `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION` get injected. **Don't "fix" this
-  by moving it into the xcconfig** — it will silently not take effect.
-- `security set-key-partition-list` after the import is load-bearing. Without it
-  `codesign` blocks on a GUI keychain prompt nobody can answer and the job hangs
-  until it times out.
-- **Raw `xcodebuild`, not `cargo tauri ios build`** — that's what makes the
-  command-line signing overrides possible. Use `-project` (there is no Pods
-  workspace) and lowercase `-configuration release` (XcodeGen named the configs
-  `debug`/`release`).
-- **`cargo tauri ios xcode-script` cannot run on a clean machine, so CI skips
-  it.** The "Build Rust Code" pre-build phase calls that command, and it is *not*
-  standalone: it calls `read_options()`, which reads
-  `$TMPDIR/<identifier>-server-addr` and then connects to a **WebSocket server
-  that only exists while `cargo tauri ios dev|build` is running**. There is no
-  flag to bypass it. On a dev machine it works because a Tauri CLI session is
-  alive; under a bare `xcodebuild` on a fresh runner it panics with *"failed to
-  read missing addr file …-server-addr"*. So the workflow builds the staticlib
-  itself (`cargo build -p cha-gui --lib --release --target aarch64-apple-ios
-  --features tauri/custom-protocol`), copies it to
-  `gen/apple/Externals/arm64/release/libapp.a`, and sets
-  `CHA_PREBUILT_RUST_LIB=1` on the `xcodebuild` line; the script phase checks
-  that and exits 0. **Don't remove the guard from `project.yml`/`project.pbxproj`
-  thinking it's dead code** — it's the only reason a signed CI build is possible.
-  Only arm64 is built: `ARCHS` is `arm64` and `EXCLUDED_ARCHS[sdk=iphoneos*]`
-  drops x86_64.
-- **`--features tauri/custom-protocol` is mandatory on that build.** tauri-cli's
-  `build_options()` pushes it onto *every* build (and `dev_options()` filters it
-  *out*, which is why dev builds don't carry it) — so hand-rolling the cargo
-  invocation means hand-rolling this too. Without it `generate_context!` never
-  registers the asset protocol, and the installed app fails at launch with
-  *"Failed to request tauri://localhost/ … did you grant local network
-  permissions? That is required to reach the development server"*. That message
-  is a red herring: nothing is wrong with the network or the device, the app
-  simply has no embedded assets to serve. **It builds, signs, uploads, and
-  passes review-side processing perfectly — the breakage only appears on a real
-  install**, so there is no CI signal for it. `mobile.yml`'s build-check passes
-  the same feature so it compiles the same cfg paths.
-- **`gen/apple/assets` must be created before the archive.** It's a folder
-  reference in Copy Bundle Resources, but it's an *empty* directory the Tauri CLI
-  makes and git cannot track one — so a fresh checkout lacks it and the Resources
-  phase fails with "Build input file cannot be found". The workflow `mkdir -p`s
-  it. Same class of problem as the pre-build script: things `tauri ios build`
-  would have arranged, which a bare `xcodebuild` must arrange for itself.
-- **Not fastlane, deliberately.** `gym`/`pilot` wrap the same three commands, and
-  `match`'s reason to exist is sharing certs across a team. Adopting it would put
-  a Ruby toolchain into a Rust workspace that has none — no `Gemfile`, no
-  `Fastfile`, CocoaPods never even run — to replace ~40 lines of YAML, and would
-  add an abstraction layer between you and already-cryptic signing errors.
-  Reconsider only if store metadata/screenshots start wanting version control
-  (`deliver`) or testers need scripted management (`pilot`).
-- **Secrets:** `APPLE_TEAM_ID`, `IOS_DIST_CERT_P12` (`base64 -i dist.p12`),
-  `IOS_DIST_CERT_PASSWORD`, `IOS_PROVISION_PROFILE` (`base64 -i
-  *.mobileprovision`), plus `APPLE_API_KEY`/`APPLE_API_ISSUER`/
-  `APPLE_API_KEY_CONTENT` for the upload — **shared with `release.yml`'s macOS
-  notarization**, which works as long as that key has App Manager access. The job
-  checks for the first four up front rather than failing inside `codesign` twenty
-  minutes later. Note these are **iOS-type** credentials: the `APPLE_CERTIFICATE`
-  / `APPLE_SIGNING_IDENTITY` Developer ID secrets used for macOS notarization
-  cannot sign iOS.
-- **The provisioning profile expires after one year.** The symptom is a signing
-  failure in the archive step; the fix is re-downloading it from the developer
-  portal and re-pasting the secret.
-- **Expect an ITMS-91053 email** ("missing API declaration") after the first
-  upload — Rust std and WKWebView touch required-reason APIs. It's a warning for
-  TestFlight but **blocks App Store submission**. The fix is a
-  `PrivacyInfo.xcprivacy` in `gen/apple/cha-gui_iOS/` with the reason codes
-  Apple's email names, then `xcodegen generate` in `gen/apple` and commit the
-  regenerated `project.pbxproj` so it's bundled as a resource. Wait for the email
-  rather than guessing the codes.
 
 ## What to avoid
 

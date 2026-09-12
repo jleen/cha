@@ -20,6 +20,14 @@ you can also just replace `words.txt` with your preferred list; it will be compi
 application and bundled with it, to be used in addition to any
 user-provided word lists.
 
+## Implementation notes and agent memory
+
+Design notes, invariants, build process, and release procedures for each module live in
+[docs/](docs/). Those documents are written by Claude, primarily for its own use,
+but mentioned here since they might be a useful reference for human collaborators as well.
+See
+[docs/README.md](docs/README.md) for more detail.
+
 ## GUI usage
 
 Just install and run the application. If no word lists are found,
