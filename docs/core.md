@@ -434,6 +434,25 @@ ceiling. Patterns on the regex path are still in the corpus and are expected to
 report a floor of 1 — a floor above 1 for one of them means something has been
 rerouted by accident. Re-run `limitcal` before changing the number.
 
+**The calibration is against `words.txt`, and a much larger dictionary can push
+past it.** The default clears every pattern in the corpus on the committed
+83_568-word list with room to spare, but the budget is spent per *candidate
+word*, and both the number of candidates and their length matter. Measured on
+`deploy/dictionaries/wikipedia.dict` — 2.8M entries, many of them long
+multi-word place names — `` *a*b*c*d*`2 `` returns 2_157_796 matches at the
+shipped 50_000 and 2_159_108 at 2_000_000, so it is truncating at the default by
+about 0.06%. Covering it costs 19.3 s to 21.8 s for those 1_312 matches.
+
+This is the documented degradation working as designed rather than a bug, and it
+is *better* than it was — the same pattern returned 2_157_571 before fuzz moved
+to the structural engine. But it is worth knowing before quoting a match count
+from a supplementary dictionary as complete, and it is the reason to re-measure
+rather than assume if someone reports a "missing" match on a large list. Raising
+the default is a real option; it costs nothing on `words.txt`, because a limit
+only binds once it is exceeded. It should be calibrated against the big
+dictionary rather than guessed at, which `limitcal` cannot do today (it hardcodes
+`words.txt`).
+
 **Runs of `.` and `*` are normalized, and that is the real fix for star-heavy
 patterns.** A maximal run of gap symbols with k dots and at least one star
 accepts exactly the words of length >= k, *whatever the interleaving* — each `.`
