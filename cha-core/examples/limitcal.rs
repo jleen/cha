@@ -34,7 +34,8 @@ const REGEX_PATTERNS: &[&str] = &[
     "*x*",
     "..o..e.",
     "s*t*p",
-    // Digit variables: these take fancy-regex's backtracking VM.
+    // Digit variables: these take the structural engine, and used to be the
+    // only thing in the language reaching a backtracking regex.
     "1.1",
     "11",
     "1221",

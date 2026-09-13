@@ -460,6 +460,13 @@ The payoff dwarfs the limit tuning:
 | `` *.*.*.*.*.*.*.*.*.*cat`1 `` | 686 ms | 3.4 ms |
 | `*.*.*1*.*.*1` | 2.9 s, 14_333 matches | 78 ms, 14_386 matches |
 
+That "after" column is the gap-run work's own result, kept as the historical
+record of why the normalization exists. All four have since moved again — they
+are 3.9 ms, 16.9 ms, 1.4 ms and 8.2 ms today — because every one of them is a
+star-plus-digit or a fuzz pattern, and both of those moved to the structural
+engine. The normalization is still what keeps them tractable; the engine change
+compounds with it rather than replacing it.
+
 Note the match counts: those patterns were exceeding a per-word limit and
 degrading the over-budget words to "no match", silently returning a fraction of
 the real result. **A limit that truncates is a correctness bug**, so removing the

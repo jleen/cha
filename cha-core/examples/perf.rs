@@ -117,8 +117,10 @@ struct Probe {
 // crate; everything else is plain `cargo fmt` output.
 #[rustfmt::skip]
 const CORPUS: &[Probe] = &[
-    // The regex template path with no digit variables. fancy-regex hands these
-    // straight to the linear `regex` crate, so none of them can backtrack.
+    // The regex template path. With digit variables gone from it there is no
+    // backreference left to emit, so this is a pure DFA language and `regex`
+    // matches it in linear time — none of these can backtrack, and none of them
+    // can truncate.
     Probe { tier: "template", pattern: ".....", exercises: "fixed_len early-out; the cheapest possible scan" },
     Probe { tier: "template", pattern: "c.t", exercises: "short fixed_len; nearly the whole list rejected on length" },
     Probe { tier: "template", pattern: "..o..e.", exercises: "fixed_len with interior literals" },
@@ -151,7 +153,7 @@ const CORPUS: &[Probe] = &[
     Probe { tier: "fuzzy", pattern: "..@#..`2", exercises: "fuzzy classes" },
     Probe { tier: "fuzzy", pattern: "*cat*`1", exercises: "starred: no length early-out, Star branches twice per node" },
     Probe { tier: "fuzzy", pattern: "abcdefghij`4", exercises: "long literal, deep budget, no matches: pure reject-path cost" },
-    Probe { tier: "fuzzy", pattern: "*a*b*c*d*`2", exercises: "sets the max_fuzzy_steps floor (3_698)" },
+    Probe { tier: "fuzzy", pattern: "*a*b*c*d*`2", exercises: "sets the max_structural_steps floor (3_053)" },
     // The anagram pool. Order-independent by construction: `.` folds into a
     // count and `*` into a bool, so gap-run normalization does not apply.
     Probe { tier: "anagram", pattern: ";obelisk", exercises: "pure pool, exact: length equality rejects almost everything" },
@@ -252,7 +254,7 @@ struct Measured {
 /// different dictionaries is meaningless rather than merely noisy. The limits are
 /// recorded separately and do **not** block a comparison: changing a `Limits`
 /// default is one of the main things this suite exists to evaluate ("I lowered
-/// `max_fuzzy_steps` — did it truncate any results?"), so a mismatch is reported
+/// `max_structural_steps` — did it truncate any results?"), so a mismatch is reported
 /// as context for reading the diff, not as a reason to refuse it.
 struct Baseline {
     fingerprint: String,

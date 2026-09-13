@@ -404,8 +404,9 @@ fn is_vowel(b: u8) -> bool {
 /// candidate word, and the effect was severe. Before this:
 ///
 /// - `**********1**********1` took 24.7 s per scan and returned 9_778 of its
-///   25_193 matches, the rest silently truncated by `backtrack_limit`. As
-///   `*1*1` it costs 139 ms and returns all of them.
+///   25_193 matches, the rest silently truncated by the per-word limit of the
+///   day. As `*1*1` it cost 139 ms and returned all of them (17 ms now that
+///   digit variables take the structural engine).
 /// - `` **********cat`1 `` took 7.9 s; as `` *cat`1 `` it takes 8.7 ms.
 /// - `` *.*.*.*.*.*.*.*.*.*cat`1 `` took 686 ms; as `` .........*cat`1 `` it
 ///   takes 2.3 ms. Handling `.` and not just `*` is what closes this one — a
@@ -2301,8 +2302,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_star_stays_bounded() {
-        // The fuzzy path is a hand-rolled backtracker whose `Star` arm branches
-        // exponentially and had no step budget at all before this.
+        // A hand-rolled backtracker whose `Star` arm branches exponentially and
+        // had no step budget at all before this. The engine underneath moved
+        // from `fuzzy_match` to `walk`; the exposure did not.
         let m = compile_pattern_with(&format!("{}cat`3", "*".repeat(12)), &tight()).unwrap();
         let _ = m("abcdefghijklmnopqrstuvwxyz");
     }
@@ -2324,7 +2326,7 @@ mod tests {
         assert!(m("cat").is_some(), "budget leaked across words");
     }
 
-    // --- The fuzzy path's fixed-length early-out ---------------------------
+    // --- The fuzz path's fixed-length early-out ----------------------------
     //
     // A star-free fuzzy template matches only words of exactly `toks.len()`
     // bytes, so the closure rejects everything else without recursing. That is a
@@ -2473,10 +2475,12 @@ mod tests {
 
     #[test]
     fn test_collapsing_rescues_a_previously_budget_bound_pattern() {
-        // `**********1**********1` exceeded `backtrack_limit` on many words and
+        // `**********1**********1` exceeded the per-word limit on many words and
         // degraded them to "no match" — silently returning a fraction of the
         // real matches. Collapsed to `*1*1` it is bounded, so the two spellings
-        // must now agree everywhere, including on long words.
+        // must agree everywhere, including on long words. Still true after the
+        // pattern moved to the structural engine, which is the point of testing
+        // the equivalence rather than a step count.
         let many = compile_pattern(&format!("{}1{}1", "*".repeat(10), "*".repeat(10))).unwrap();
         let one = compile_pattern("*1*1").unwrap();
         for w in [
@@ -2533,7 +2537,7 @@ mod tests {
         // exactly the words of length >= k, whatever the interleaving — so it
         // must behave identically to `.`xk followed by one `*`. Enumerate every
         // such run up to length 5 (2^5 interleavings each) against both a bare
-        // and a literal-tailed form, on both the regex and the fuzzy path.
+        // and a literal-tailed form, on both the regex and the structural path.
         for len in 1..=5usize {
             for bits in 0..(1u32 << len) {
                 let run: String = (0..len)
@@ -2931,8 +2935,10 @@ mod tests {
 
     #[test]
     fn test_structural_steps_cap_degrades_to_no_match() {
-        // Match-time: a starved budget loses matches rather than raising, the
-        // same way `backtrack_limit` and `max_fuzzy_steps` do.
+        // Match-time: a starved budget loses matches rather than raising, which
+        // is what keeps the hot path `Result`-free. It is the only match-time
+        // work limit left — `backtrack_limit` and `max_fuzzy_steps` were retired
+        // with the engines they bounded.
         let starved = Limits {
             max_structural_steps: 1,
             ..Limits::default()
