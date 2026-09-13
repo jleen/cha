@@ -80,6 +80,7 @@ commit at a time.
 | Subpatterns (`8a2fd60`) | — | — | **−7 to −9%** | — | — |
 | Two engines (`a8d6cad`) | — | — | — | — | backref **−87%**, pathological **−68%**, cheap fuzz **+8-10%** |
 | Unicode folding | **+7-9%** | **+10-14%** | **+2-4%** | +9-13% | fuzz/digit/subpattern +3-4% |
+| Structural engine goes Unicode | **+4-5%** | **+3-10%** | **wash** | — | fuzz +5%, backref +4-5%, subpattern +2-3% |
 
 **Ranges, because point values here are false precision.** Two interleaved
 same-session runs of the same two builds, 25 reps each on an idle machine,
@@ -102,6 +103,17 @@ Notes on each:
   53 ms as a tier. The cost was 8-10% on *cheap* fuzzy patterns, accepted
   deliberately: fuzz is an uncommon shape, and merging deleted a duplicated
   engine. See the table in "Two engines" below.
+- **Structural engine goes Unicode** paid for consistency, and the secondary
+  tiers it owns came in under the 10% budget set for them. Pure anagram is a
+  wash, as it should be — it runs on a different engine. The row worth
+  questioning is **dotted at +4-5%**, which reproduced across three interleaved
+  runs on a code path this change does not touch at all: the regex template
+  matcher is byte-identical before and after. Halving the walker's code (the enum
+  experiment below) did not move it, which rules out the obvious explanation, so
+  the remaining candidate is codegen and inlining shifting as the crate changes.
+  Recorded rather than explained. `dotted+anagram` is one pattern and behaved
+  like it — +3%, +3%, +10% — so treat that cell as the least trustworthy in the
+  table.
 - **Unicode folding** is a uniform tax from carrying two forms per word, not one
   effect. Four causes were found and fixed before it came down from +165%; see
   "What it cost, and where". What remains is within budget — the highest-priority
@@ -406,20 +418,41 @@ Three properties make it cheap:
   in `ele(ph)ant` constrain nothing that `elephant` doesn't, so they cost
   nothing. Nested groups inside a spliced one are still found.
 
-**The engine is ASCII-only**, and that is load-bearing rather than incidental:
-with an ASCII-only pattern no token can consume a non-ASCII byte, so byte offsets
-are char offsets, every slice it takes is on a char boundary, and the length
-early-out is exact. `slice_str` still checks `from_utf8`, so a cut landing
-mid-character is a non-match rather than a panic.
+**The engine indexes characters, not bytes**, and that is the difference between
+this and the ASCII-only walker it grew out of. Every `Tok` holds a `char`, the
+`Env` binds a `char`, and `Node::min`/`max`/`suffix` count characters — the unit
+the `(;glo)` bug was a confusion about, so it is worth saying twice.
 
-This used to cost nothing, because the regex path's `*` was `[a-z]*` and rejected
-the same words. Since folding it does: the regex path matches a word the fold
-leaves non-ASCII and this one cannot, so `.....` matches a Greek word and
-`` .....`1 `` does not. `test_structural_engine_stays_ascii_only` pins that split
-so lifting it is a deliberate change. Lifting it means moving the walker to char
-indices, which is its own perf question — and the fold makes the case rare rather
-than absent: under 1% of a large real word list survives folding as non-ASCII, and
-none of `words.txt`.
+Words come in two shapes and the walker is generic over which:
+
+- `AsciiText` addresses an all-ASCII word by byte offset, every method a load.
+  That is the shipped word list entirely and over 99% of a large supplementary
+  one after folding, so it is the path that has to stay free.
+- `WideText` addresses anything else by character index, built on the stack
+  (`WIDE_STACK_CHARS`) so the rare path allocates nothing either.
+
+`Text::slice` gives the anagram pool its `&str` back and **cannot** land inside a
+character, which is a stronger guarantee than the `from_utf8` check it replaced.
+
+**Generic, not an enum, and that was measured.** An enum with one copy of
+`walk`/`match_node` plus a discriminant check is less code and reads as the
+simpler choice; it cost the subpattern tier 7.5% against the generic version's
+2.1%, worst case 29% against 8%, and helped nothing elsewhere. Monomorphizing
+keeps the ASCII instantiation equal to the byte walker that preceded it.
+
+### The one place non-ASCII does not just work
+
+A digit variable *spent inside an anagram pool* — `(1234)(;1234)` — binds at
+match time, and a `Pool`'s histogram slots are allocated at compile time from the
+letters the pattern spells out. There is nowhere to count a non-Latin letter the
+pattern could not name in advance, so `Pool::check` declines rather than
+miscounting.
+
+The alternative needs slots assigned per word, and then two digits that bind the
+*same* letter have to be detected and merged or the counts drift silently — a
+worse failure than not matching. `(1234)(;1234)` keeps working for Latin, which
+is what it is for. Pinned by
+`test_pool_variable_binding_a_non_latin_letter_is_the_documented_hole`.
 
 ### Absorption: which letters excuse the outer pool
 
@@ -486,7 +519,9 @@ Two it did **not** lift, both preserved exactly:
 - **`&` and `!` inside `(...)`.** Both are whole-query operators, and the `&`
   split is textual — without the check in `reject_operators_in_subpattern`,
   `(a&b)` would be torn in half and surface as a baffling `"Unclosed '('"`.
-- **Non-ASCII pattern characters**, per the ASCII argument above.
+
+Non-ASCII pattern characters used to be on that list. They are not any more — a
+letter is a letter here in whatever script it arrives in.
 
 ## Every backtracking path needs a bound (`Limits`)
 

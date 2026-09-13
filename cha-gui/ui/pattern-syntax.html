@@ -106,6 +106,13 @@ t....;intra       # starts with T, is an anagram of INTRA
         <code>ω</code> is a vowel. Anything that is not a letter, in any script, is
         treated the way <code>7</code> and <code>/</code> have always been.
       </p>
+      <p>
+        This holds across the whole syntax — templates, anagrams, subpatterns,
+        digit variables and <code>`N</code> alike. <code>.....</code>,
+        <code>.....`1</code> and <code>(.....)</code> all match ΩΜΈΓΑ. (One corner
+        does not: a digit variable spent inside an anagram pool, as in
+        <code>(1234)(;1234)</code>, only matches Latin letters.)
+      </p>
 
       <h2>Subpatterns</h2>
       <p>

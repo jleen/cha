@@ -463,8 +463,8 @@ fn compile_template(template: &str) -> Result<Matcher, PatternError> {
     }))
 }
 
-fn is_vowel(b: u8) -> bool {
-    matches!(b, b'a' | b'e' | b'i' | b'o' | b'u')
+fn is_vowel(c: char) -> bool {
+    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u')
 }
 
 /// Consume the run of `.`/`*` following the `*` the caller just matched, and
@@ -855,10 +855,14 @@ fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
 /// Passed **by value** through the structural matcher, which is what lets a
 /// failed branch be abandoned without unwinding anything — ten bytes is cheaper
 /// to copy than a binding trail is to maintain.
-type Env = [u8; 10];
+type Env = [char; 10];
 
 /// The environment every pattern without digit variables matches under.
-const NO_VARS: Env = [0; 10];
+const NO_VARS: Env = ['\0'; 10];
+
+/// `Env`'s "not yet bound" marker. No word contains it — the loader rejects
+/// empty lines and a NUL would be a non-letter anyway.
+const UNBOUND: char = '\0';
 
 /// A compiled anagram pool — everything after a `;` — together with what the
 /// enclosing template already accounts for.
@@ -1011,13 +1015,21 @@ impl Pool {
                 let mut adjusted = *base_counter;
                 for &d in &self.vars {
                     let b = env[d as usize];
-                    if b == 0 {
-                        // Unbound. `check_variable_binding` rules this out at
-                        // compile time; degrading to "no match" keeps the hot
-                        // path `Result`-free if it ever slipped through.
-                        return None;
-                    }
-                    adjusted.ascii[(b - b'a') as usize] += 1;
+                    // Unbound is ruled out at compile time by
+                    // `check_variable_binding`; degrading to "no match" keeps
+                    // the hot path `Result`-free if it ever slipped through.
+                    //
+                    // A *non-Latin* bound letter is the one documented hole in
+                    // Unicode support. A pool's histogram slots are allocated at
+                    // compile time from the letters the pattern spells out, and
+                    // a variable's letter is not known until match time, so
+                    // there is nowhere to count it. Giving it a dynamic slot
+                    // would mean two digits binding the same letter had to be
+                    // detected and merged, or the counts drift silently — a
+                    // worse failure than not matching. So `(1234)(;1234)` works
+                    // for Latin, which is what it is for, and declines to match
+                    // a word whose letters the fold left non-ASCII.
+                    adjusted.ascii[ascii_slot(b)?] += 1;
                 }
                 self.check_combo(&adjusted, base_size + self.vars.len(), candidate)
             };
@@ -1301,22 +1313,26 @@ fn diff_letters(more: &Histogram, less: &Histogram, alphabet: &[char], foreign: 
 
 /// One position in a subpattern-bearing template.
 ///
-/// The same vocabulary as [`FuzzTok`] (which stays untouched — the two engines
-/// have different jobs) plus the two things that are new here: a variable, and
-/// a nested sub-pattern.
+/// Everything here is a `char`, not a byte. That is what lets this engine mean
+/// the same thing as the regex one for a word the fold left non-ASCII: `.....`
+/// and `` .....`1 `` used to disagree about a Greek word, which is indefensible
+/// once the rest of the syntax needs one sentence to explain.
 enum Tok {
     /// A literal letter (lowercased).
-    Lit(u8),
+    Lit(char),
     /// Punctuation (`-`, `'`, space).
-    Punct(u8),
-    /// `.` — any letter.
+    Punct(char),
+    /// `.` — any letter, in any script.
     Any,
     /// `@` — a vowel.
+    ///
+    /// Latin-only, deliberately, exactly as `@` is on the regex path: "is `ω` a
+    /// vowel" has no locale-free answer.
     Vowel,
-    /// `#` — a consonant.
+    /// `#` — a consonant. Latin-only, for the same reason as [`Tok::Vowel`].
     Consonant,
-    /// `[abc]` — one letter from the set (lowercased bytes).
-    Class(Vec<u8>),
+    /// `[abc]` — one letter from the set (lowercased).
+    Class(Vec<char>),
     /// `*` — zero or more letters.
     Star,
     /// A digit variable. Binds the letter at this position on first use, and
@@ -1340,8 +1356,12 @@ struct Node {
     /// True when there is no template half at all (`(;oif)`), so the token list
     /// imposes nothing and the pool alone fixes the length.
     pure: bool,
-    /// Byte length this node can match. `max` is `None` when a `*` makes it
-    /// open-ended.
+    /// Character length this node can match. `max` is `None` when a `*` makes
+    /// it open-ended.
+    ///
+    /// **Characters, not bytes.** Every token consumes exactly one character
+    /// whatever its UTF-8 width, so this is the unit the walker indexes in. The
+    /// `(;glo)` bug was precisely a confusion between the two.
     min: usize,
     max: Option<usize>,
     /// `max == Some(min)`: every element has a fixed width, so the slice length
@@ -1349,12 +1369,13 @@ struct Node {
     ///
     /// Worth a field because it lets the walker skip its length prune entirely.
     /// For a rigid node the prune is provably redundant — the caller only ever
-    /// hands it a slice of exactly `min` bytes, and every token consumes one — so
+    /// hands it a slice of exactly `min` characters, and every token consumes
+    /// one — so
     /// it is two loads and two compares per node buying nothing. That is most of
     /// what the merged fuzzy path was paying: `` cathode`1 `` walks seven rigid
     /// tokens per candidate and nothing else.
     rigid: bool,
-    /// `suffix[i]` is `(min, max)` bytes the tokens from `i` onward need, with
+    /// `suffix[i]` is `(min, max)` characters the tokens from `i` onward need, with
     /// `usize::MAX` for "unbounded". Indexed up to and including `toks.len()`,
     /// so the walker can prune before looking at a token as well as after the
     /// last one.
@@ -1448,10 +1469,7 @@ fn tokenize_structural(template: &str, limits: &Limits) -> Result<Vec<Tok>, Patt
                 let j = i + rel;
                 let mut set = Vec::new();
                 for &ch in &chars[i + 1..j] {
-                    if !ch.is_ascii() {
-                        return Err(PatternError(NON_ASCII_SUBPATTERN.to_string()));
-                    }
-                    set.push(ch.to_ascii_lowercase() as u8);
+                    set.push(ch);
                 }
                 out.push(Tok::Class(set));
                 i = j;
@@ -1478,9 +1496,10 @@ fn tokenize_structural(template: &str, limits: &Limits) -> Result<Vec<Tok>, Patt
                 ))
             }
             c if c.is_ascii_digit() => out.push(Tok::Var(c as u8 - b'0')),
-            c @ ('-' | '\'' | ' ') => out.push(Tok::Punct(c as u8)),
-            c if c.is_ascii_alphabetic() => out.push(Tok::Lit(c.to_ascii_lowercase() as u8)),
-            c if c.is_alphabetic() => return Err(PatternError(NON_ASCII_SUBPATTERN.to_string())),
+            c @ ('-' | '\'' | ' ') => out.push(Tok::Punct(c)),
+            // The pattern is folded before it is compiled, so a letter arrives
+            // here already canonical and in any script.
+            c if c.is_alphabetic() => out.push(Tok::Lit(c)),
             c => {
                 return Err(PatternError(format!(
                     "Template has meaningless character '{}'",
@@ -1492,8 +1511,6 @@ fn tokenize_structural(template: &str, limits: &Limits) -> Result<Vec<Tok>, Patt
     }
     Ok(out)
 }
-
-const NON_ASCII_SUBPATTERN: &str = "Subpatterns support only ASCII letters";
 
 /// Compile one `template;pool`, recursively.
 fn compile_node(src: &str, limits: &Limits) -> Result<Node, PatternError> {
@@ -1599,15 +1616,112 @@ fn visit_bindings(node: &Node, bound: &mut [bool; 10]) -> Result<(), PatternErro
     Ok(())
 }
 
-/// The slice `start..end` as a string, or `None` when those offsets do not fall
-/// on char boundaries.
+/// Position-indexed access to one word, in whatever unit makes indexing uniform.
 ///
-/// On a word this engine can actually match the offsets are always boundaries
-/// (everything it consumes is ASCII), so this is a guard rather than a branch
-/// that gets taken — but it is the guard that makes byte slicing panic-free on
-/// a word list containing anything else.
-fn slice_str(w: &[u8], start: usize, end: usize) -> Option<&str> {
-    std::str::from_utf8(&w[start..end]).ok()
+/// The walker needs three things of a word: how many positions it has, the
+/// character at a position, and a `&str` for a range of them (for the anagram
+/// pool, which works in UTF-8). UTF-8 gives the first two only by scanning, so
+/// this abstracts over *how* a word is addressed and leaves the walker to say
+/// *what* it wants.
+///
+/// Two implementations, chosen per word rather than per pattern:
+///
+/// - [`AsciiText`] for a word that is entirely ASCII — position is byte offset,
+///   and every method is a load. This is the overwhelming majority: the shipped
+///   word list entirely, and over 99% of a large supplementary one after folding.
+/// - [`WideText`] for anything else, over a character index built on the stack.
+///
+/// **`Walker` is generic over this rather than holding an enum**, and that was
+/// measured, not assumed. The enum — one copy of `walk`/`match_node` plus a
+/// discriminant check — is less code and looks like the simpler choice, but it
+/// cost the subpattern tier 7.5% against the generic version's 2.1% (worst case
+/// 29% against 8%) and helped nothing. Monomorphizing means the ASCII path
+/// compiles to the byte walker that was here before non-Latin letters could
+/// reach it.
+trait Text {
+    /// Positions, not bytes.
+    fn len(&self) -> usize;
+    /// The character at `i`, which must be less than `len`.
+    fn at(&self, i: usize) -> char;
+    /// Positions `from..to` as a string. Always on a character boundary by
+    /// construction — which is a stronger guarantee than the `from_utf8` check
+    /// this replaced, and one the `(;glo)` bug got wrong.
+    fn slice(&self, from: usize, to: usize) -> &str;
+}
+
+/// An all-ASCII word, addressed by byte offset.
+#[derive(Clone, Copy)]
+struct AsciiText<'a>(&'a str);
+
+impl Text for AsciiText<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    #[inline]
+    fn at(&self, i: usize) -> char {
+        self.0.as_bytes()[i] as char
+    }
+    #[inline]
+    fn slice(&self, from: usize, to: usize) -> &str {
+        &self.0[from..to]
+    }
+}
+
+/// A word carrying at least one non-ASCII character, addressed by character
+/// index. `idx[i]` is the character at position `i` and the byte offset it
+/// starts at; `idx` has one trailing entry for the end of the string, so
+/// `slice` needs no special case.
+#[derive(Clone, Copy)]
+struct WideText<'a> {
+    s: &'a str,
+    idx: &'a [(u32, char)],
+}
+
+impl Text for WideText<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.idx.len() - 1
+    }
+    #[inline]
+    fn at(&self, i: usize) -> char {
+        self.idx[i].1
+    }
+    #[inline]
+    fn slice(&self, from: usize, to: usize) -> &str {
+        &self.s[self.idx[from].0 as usize..self.idx[to].0 as usize]
+    }
+}
+
+/// How many characters a word may have before the character index spills to the
+/// heap. Longer than any word in any real list; the buffer is only built for a
+/// word the fold left non-ASCII, which is under 1% of a large one and none of
+/// the shipped list.
+const WIDE_STACK_CHARS: usize = 64;
+
+/// Build the character index for `word` into `buf`, spilling to `heap` when the
+/// word is longer than the stack buffer. Returns the slice to address it by.
+///
+/// The trailing sentinel entry is what lets `WideText::slice` take an exclusive
+/// upper bound without branching on "is this the end".
+fn index_chars<'a>(
+    word: &str,
+    buf: &'a mut [(u32, char); WIDE_STACK_CHARS],
+    heap: &'a mut Vec<(u32, char)>,
+) -> &'a [(u32, char)] {
+    let n = word.chars().count();
+    if n < WIDE_STACK_CHARS {
+        for (slot, (off, c)) in buf.iter_mut().zip(word.char_indices()) {
+            *slot = (off as u32, c);
+        }
+        buf[n] = (word.len() as u32, '\0');
+        &buf[..=n]
+    } else {
+        heap.clear();
+        heap.extend(word.char_indices().map(|(off, c)| (off as u32, c)));
+        heap.push((word.len() as u32, '\0'));
+        heap.as_slice()
+    }
 }
 
 /// One word's worth of matching state, so the recursion carries pointers rather
@@ -1625,8 +1739,9 @@ fn slice_str(w: &[u8], start: usize, end: usize) -> Option<&str> {
 ///   length — and `Vec<u8>::truncate` is a length store where `String::truncate`
 ///   asserts a char boundary first. Every letter here comes from `diff_letters`,
 ///   so it is ASCII by construction.
-struct Walker<'w> {
-    w: &'w [u8],
+struct Walker<'w, T: Text> {
+    w: T,
+    _marker: std::marker::PhantomData<&'w ()>,
     /// Nodes left in this word's budget. See `Limits::max_structural_steps`.
     steps: u32,
     /// Digit variable bindings, restored on backtracking rather than copied down.
@@ -1639,7 +1754,18 @@ struct Walker<'w> {
 #[derive(Clone, Copy)]
 struct Mark(usize, usize);
 
-impl Walker<'_> {
+impl<T: Text> Walker<'_, T> {
+    fn new(w: T, steps: u32) -> Self {
+        Walker {
+            w,
+            _marker: std::marker::PhantomData,
+            steps,
+            env: NO_VARS,
+            unused: Vec::new(),
+            extra: Vec::new(),
+        }
+    }
+
     fn mark(&self) -> Mark {
         Mark(self.unused.len(), self.extra.len())
     }
@@ -1708,9 +1834,7 @@ impl Walker<'_> {
                     return true;
                 }
                 self.rewind(mark);
-                ci < end
-                    && self.w[ci].to_ascii_lowercase().is_ascii_lowercase()
-                    && self.walk(node, ti, ci + 1, end, fuzz)
+                ci < end && self.w.at(ci).is_alphabetic() && self.walk(node, ti, ci + 1, end, fuzz)
             }
             Tok::Sub(sub) => {
                 // Only cuts that leave the rest of the tokens satisfiable are
@@ -1737,13 +1861,13 @@ impl Walker<'_> {
                 if ci >= end {
                     return false;
                 }
-                let c = self.w[ci].to_ascii_lowercase();
+                let c = self.w.at(ci);
                 let mut fuzz2 = fuzz;
                 let satisfied = match tok {
                     Tok::Lit(l) => {
                         if c == *l {
                             true
-                        } else if fuzz > 0 && c.is_ascii_lowercase() {
+                        } else if fuzz > 0 && c.is_alphabetic() {
                             // A literal mismatch is allowed only while budget
                             // remains, and only onto a letter — mirroring the
                             // wildcard a freed slot effectively becomes.
@@ -1754,7 +1878,8 @@ impl Walker<'_> {
                         }
                     }
                     Tok::Punct(p) => c == *p,
-                    Tok::Any => c.is_ascii_lowercase(),
+                    Tok::Any => c.is_alphabetic(),
+                    // Latin-only, matching `@`/`#` on the regex path.
                     Tok::Vowel => is_vowel(c),
                     Tok::Consonant => c.is_ascii_lowercase() && !is_vowel(c),
                     Tok::Class(set) => set.contains(&c),
@@ -1764,14 +1889,14 @@ impl Walker<'_> {
                     Tok::Var(d) => {
                         let slot = *d as usize;
                         let prev = self.env[slot];
-                        if !c.is_ascii_lowercase() {
+                        if !c.is_alphabetic() {
                             false
-                        } else if prev == 0 {
+                        } else if prev == UNBOUND {
                             self.env[slot] = c;
                             if self.walk(node, ti + 1, ci + 1, end, fuzz) {
                                 return true;
                             }
-                            self.env[slot] = 0;
+                            self.env[slot] = UNBOUND;
                             return false;
                         } else {
                             prev == c
@@ -1786,7 +1911,8 @@ impl Walker<'_> {
 
     /// Match one whole node against the slice `start..end`.
     ///
-    /// **A rigid node may only be handed a slice of exactly `node.min` bytes.**
+    /// **A rigid node may only be handed a slice of exactly `node.min`
+    /// characters.**
     /// `walk` skips its per-token length prune for such a node on the strength of
     /// that, so a caller that breaks it gets a match reported before the end of
     /// the slice. Both callers hold to it — the `Sub` arm forces `cut` when
@@ -1811,7 +1937,7 @@ impl Walker<'_> {
         // that spends variables has to wait for the template to bind them.
         if let Some(pool) = &node.pool {
             if pool.vars.is_empty() {
-                match slice_str(self.w, start, end).and_then(|s| pool.check(s, &NO_VARS)) {
+                match pool.check(self.w.slice(start, end), &NO_VARS) {
                     Some(detail) => self.push(&detail),
                     None => return false,
                 }
@@ -1826,7 +1952,7 @@ impl Walker<'_> {
 
         if !pool_checked {
             if let Some(pool) = &node.pool {
-                match slice_str(self.w, start, end).and_then(|s| pool.check(s, &self.env)) {
+                match pool.check(self.w.slice(start, end), &self.env) {
                     Some(detail) => self.push(&detail),
                     None => {
                         self.rewind(mark);
@@ -1847,46 +1973,47 @@ fn compile_structural(pattern: &str, limits: &Limits) -> Result<(Matcher, bool),
     let contentless = !node.has_content();
 
     let min = node.min;
-    // Every token but `Star` covers exactly one byte and every sub-node carries
-    // its own bounds, so a star-free composition matches exactly one length.
+    // Every token but `Star` covers exactly one character and every sub-node
+    // carries its own bounds, so a star-free composition matches exactly one
+    // length.
     let fixed_len = (node.max == Some(min)).then_some(min);
     let max_steps = limits.max_structural_steps;
 
     let matcher: Matcher = Box::new(move |word: &str| {
-        // The same length early-out the regex path uses, and for the same reason:
-        // on a large list almost every word is the wrong length, so this replaces
-        // the whole walk with an integer compare.
-        //
-        // But **without** that path's `is_ascii` caveat, which does not belong
-        // here. The two count different things: `fixed_len` there is a
-        // *character* count, so its exact test holds only for an ASCII word and
-        // anything else has to be handed to the engine; `min`/`max` here are
-        // *byte* counts, because every token consumes one ASCII byte and every
-        // sub-node carries its own byte bounds. So this test is exact
-        // unconditionally.
-        //
-        // Copying the caveat across was the `(;glo)` bug: it let `golßen` — seven
-        // bytes, not three — reach a walker that `Node::rigid` had told to stop
-        // checking, so the walk consumed "gol", ran out of tokens and reported a
-        // match three bytes from the end of the word.
-        if let Some(n) = fixed_len {
-            if word.len() != n {
-                return None;
-            }
-        } else if word.len() < min {
+        // Length early-out, in bytes, before anything decodes. A UTF-8 character
+        // is at least one byte, so byte length is a lower bound on character
+        // count and `< min` rejects outright whatever the word contains. That
+        // much is exact for every word and is where most of the list goes.
+        if word.len() < min {
             return None;
         }
         // Fresh budget per word, so a pathological word can't starve later ones.
-        let mut walker = Walker {
-            w: word.as_bytes(),
-            steps: max_steps,
-            env: NO_VARS,
-            unused: Vec::new(),
-            extra: Vec::new(),
-        };
-        walker
-            .match_node(&node, 0, word.len())
-            .then(|| walker.finish())
+        if word.is_ascii() {
+            // Byte offsets are character offsets, so `fixed_len` applies exactly
+            // and the walker indexes the bytes directly. This is the path the
+            // shipped word list takes in its entirety.
+            if fixed_len.is_some_and(|n| word.len() != n) {
+                return None;
+            }
+            let mut walker = Walker::new(AsciiText(word), max_steps);
+            let len = word.len();
+            walker.match_node(&node, 0, len).then(|| walker.finish())
+        } else {
+            // A word the fold left non-ASCII: build a character index — on the
+            // stack unless the word is implausibly long — and walk that. Under
+            // 1% of a large real list reaches here, and none of the shipped one.
+            let mut buf = [(0u32, '\0'); WIDE_STACK_CHARS];
+            let mut spill = Vec::new();
+            let idx = index_chars(word, &mut buf, &mut spill);
+            let text = WideText { s: word, idx };
+            let len = text.len();
+            // Now the length test is exact again, in the unit that matters.
+            if fixed_len.is_some_and(|n| len != n) {
+                return None;
+            }
+            let mut walker = Walker::new(text, max_steps);
+            walker.match_node(&node, 0, len).then(|| walker.finish())
+        }
     });
     Ok((matcher, contentless))
 }
@@ -2666,16 +2793,24 @@ mod tests {
 
     #[test]
     fn test_fuzzy_early_out_is_not_confused_by_multibyte_words() {
-        // The filter compares *byte* lengths, and the matcher is byte-indexed,
-        // so the two agree. "café" is 5 bytes but 4 chars; under a 4-token
-        // template it must be rejected, and it could not have matched anyway
-        // because every matcher arm requires an ASCII byte.
+        // "café" is 5 bytes but 4 characters, and the engine counts characters.
+        // Byte length may only be used as a *lower bound*; using it as an exact
+        // test is the `(;glo)` bug, and using it as an upper bound would reject
+        // this word before the walker ever saw it.
+        //
+        // Under a four-token template with one letter of slack it matches: `é`
+        // is a letter, so it spends the budget exactly as a wrong ASCII letter
+        // would. (A real search would have folded it to "cafe" first; this calls
+        // the matcher directly, which is where the unit confusion would show.)
         let m = compile_pattern("cafe`1").unwrap();
         assert!(m("cafe").is_some());
-        assert!(m("café").is_none());
-        // And a 5-token template must not accidentally admit it via byte length.
-        let m5 = compile_pattern("cafes`1").unwrap();
-        assert!(m5("café").is_none());
+        assert!(m("caf\u{e9}").is_some());
+        // Without the slack it does not — `é` is not `e`.
+        assert!(compile_pattern("cafe").unwrap()("caf\u{e9}").is_none());
+        // And a five-token template must not admit a four-character word, however
+        // many bytes it happens to occupy.
+        assert!(compile_pattern("cafes`1").unwrap()("caf\u{e9}").is_none());
+        assert!(compile_pattern("cafes").unwrap()("caf\u{e9}").is_none());
     }
 
     #[test]
@@ -3017,15 +3152,98 @@ mod tests {
     }
 
     #[test]
-    fn test_structural_engine_stays_ascii_only() {
-        // The documented hold: the walker is byte-indexed, and that is what makes
-        // byte offsets char offsets. So a non-Latin word is reachable by `.....`
-        // but not by the same pattern with a fuzz suffix or a subpattern. Pinned
-        // so that lifting it later is a deliberate change rather than a surprise.
-        let greek = "\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}";
-        assert!(compile_pattern(".....").unwrap()(greek).is_some());
-        assert!(compile_pattern(".....`1").unwrap()(greek).is_none());
-        assert!(compile_pattern("(.....)").unwrap()(greek).is_none());
+    fn test_digit_variables_bind_letters_of_any_script() {
+        // A variable binds a *letter*, and after the fold that means a letter in
+        // any script. `Env` holds chars for exactly this reason.
+        let m = compile_pattern("1221").unwrap();
+        assert!(m("\u{3c9}\u{3bc}\u{3bc}\u{3c9}").is_some()); // ωμμω
+        assert!(m("\u{3c9}\u{3bc}\u{3c9}\u{3bc}").is_none()); // ωμωμ
+                                                              // Distinct digits are independent variables, so they may bind letters
+                                                              // from different scripts.
+        assert!(compile_pattern("12").unwrap()("a\u{3c9}").is_some());
+        // And a variable never binds a non-letter.
+        assert!(compile_pattern("11").unwrap()("\u{d7}\u{d7}").is_none());
+    }
+
+    #[test]
+    fn test_pool_variable_binding_a_non_latin_letter_is_the_documented_hole() {
+        // The one place non-ASCII does not "just work", and it is deliberate. A
+        // pool's histogram slots are allocated at compile time from the letters
+        // the pattern spells out; a variable's letter is not known until match
+        // time, so a non-Latin one has nowhere to be counted. Giving it a dynamic
+        // slot would mean detecting two digits that bind the same letter and
+        // merging them, or the counts drift silently — a worse failure than not
+        // matching.
+        let m = compile_pattern("(1234)(;1234)").unwrap();
+        // Latin, which is what the feature is for: works.
+        assert!(m("reappear").is_some());
+        assert!(m("teammate").is_some());
+        // Non-Latin: declines to match rather than miscounting.
+        assert!(m("\u{3b1}\u{3b2}\u{3b3}\u{3b4}\u{3b4}\u{3b3}\u{3b2}\u{3b1}").is_none());
+        // A variable spent in the *template* is unaffected — only pools have the
+        // fixed slot table.
+        assert!(compile_pattern("(1234)(4321)").unwrap()(
+            "\u{3b1}\u{3b2}\u{3b3}\u{3b4}\u{3b4}\u{3b3}\u{3b2}\u{3b1}"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn test_rigid_node_length_is_counted_in_characters() {
+        // The `(;glo)` bug in its new unit. `Node::rigid` skips the per-token
+        // length prune because the caller guarantees a slice of exactly `min`
+        // *characters*; if the caller measured bytes instead, a word with a
+        // multi-byte tail would clear the filter and the walk would report a
+        // match before reaching the end of the word.
+        let m = compile_pattern("(;glo)").unwrap();
+        assert!(m("log").is_some());
+        assert!(m("gol\u{df}en").is_none()); // the original failure, 7 bytes
+        assert!(m("glo\u{e9}").is_none()); // 4 characters, 5 bytes
+        assert!(m("gloves").is_none());
+        // Same shape one level down: a rigid sub-node inside a longer pattern.
+        let n = compile_pattern("(;glo)(;ba)").unwrap();
+        assert!(n("logab").is_some());
+        assert!(n("log\u{e9}ab").is_none());
+    }
+
+    #[test]
+    fn test_mixed_script_words() {
+        // Nothing special is done for a word that mixes scripts; every character
+        // is judged on its own.
+        assert!(compile_pattern(".....").unwrap()("ab\u{3c9}cd").is_some());
+        assert!(compile_pattern("ab\u{3c9}cd").unwrap()("ab\u{3c9}cd").is_some());
+        assert!(compile_pattern(";cd\u{3c9}ab").unwrap()("ab\u{3c9}cd").is_some());
+        assert!(compile_pattern("(ab)(;dc\u{3c9})").unwrap()("ab\u{3c9}cd").is_some());
+        // A non-letter is still a non-letter wherever it sits.
+        assert!(compile_pattern(".....").unwrap()("ab\u{d7}cd").is_none());
+    }
+
+    #[test]
+    fn test_every_engine_agrees_on_non_latin_letters() {
+        // This test used to assert the opposite, and that was the last asterisk
+        // on "non-ASCII just works": `.....` matched a Greek word, the same
+        // pattern with a fuzz suffix or a pair of parens did not, and no user
+        // could be told why. All three route to different engines; all three
+        // must now agree.
+        let greek = "\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}"; // ωμεγα
+        for pat in [
+            ".....",
+            ".....`1",
+            "(.....)",
+            ";\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}",
+        ] {
+            assert!(
+                compile_pattern(pat).unwrap()(greek).is_some(),
+                "{pat} should match a five-letter Greek word"
+            );
+        }
+        // And they agree on rejecting it too, for a pattern that should not match.
+        for pat in ["......", "......`1", "(......)"] {
+            assert!(
+                compile_pattern(pat).unwrap()(greek).is_none(),
+                "{pat} is six letters and should not match a five-letter word"
+            );
+        }
     }
 
     // --- Subpatterns: `(...)` in the template half ---
@@ -3231,19 +3449,20 @@ mod tests {
     #[test]
     fn test_subpattern_syntax_errors() {
         for pat in [
-            "(;ab",         // unclosed
-            "(;ab)\u{3c9}", // a letter this engine cannot represent
-            "(;ab))",       // unmatched close
-            "(ab`1;cd)",    // fuzz does not compose with an anagram pool
-            "(1`1)x",       // nor with a digit variable
-            "(;ab)`",       // malformed fuzz count
-            "(;ab)`1`2",    // two fuzz suffixes
+            "(;ab",      // unclosed
+            "(;ab))",    // unmatched close
+            "(ab`1;cd)", // fuzz does not compose with an anagram pool
+            "(1`1)x",    // nor with a digit variable
+            "(;ab)`",    // malformed fuzz count
+            "(;ab)`1`2", // two fuzz suffixes
         ] {
             assert!(compile_pattern(pat).is_err(), "{pat} should be rejected");
         }
-        // An accented letter is *not* rejected any more: the pattern is folded
-        // before it is compiled, so `(;ab)é` arrives here as `(;ab)e`.
+        // Letters are not rejected here in any script any more: an accented one
+        // folds to ASCII before compiling, and a non-Latin one is simply a letter.
         assert!(compile_pattern("(;ab)\u{e9}").is_ok());
+        assert!(compile_pattern("(;ab)\u{3c9}").is_ok());
+        assert!(compile_pattern("(;\u{3c9}\u{3bc})").is_ok());
     }
 
     // --- Digit variables moved off the regex path ---
@@ -3370,80 +3589,84 @@ mod tests {
     }
 
     #[test]
-    fn test_a_structural_match_implies_an_ascii_word() {
-        // The engine's whole byte-offset argument rests on this claim: nothing it
-        // can match is non-ASCII, so byte offsets are char offsets and every
-        // slice it takes lands on a boundary. Assert it directly rather than
-        // trusting the reasoning — the `(;glo)` bug was a hole in exactly this,
-        // and it survived a test that checked non-ASCII words individually
-        // because that test happened to put the non-ASCII byte where a
-        // subpattern would look at it.
+    fn test_structural_and_regex_engines_agree() {
+        // The claim this replaces was "a structural match implies an ASCII
+        // word", which the byte-indexed walker made true by construction and
+        // which is now deliberately false. The useful invariant in its place is
+        // the one a user actually relies on: the two engines mean the same thing.
+        //
+        // Wrapping a template in parens routes it to the structural engine with
+        // identical semantics — a group with no `;` is spliced — so `P` and `(P)`
+        // must agree on every word, whatever script it is in. This is the same
+        // differential that priced the two engines against each other, used here
+        // for correctness rather than speed.
         let pats = [
-            "(;glo)",
-            "(;oif)(;bel)",
-            "*(;bel)",
-            "(;bel)*",
-            "(1234)(;1234)",
-            "ele(;nahpt)`1",
-            "..(;ing)",
-            "*(;ing)*",
-            "(;oif)(;bel);oifb",
+            ".", "..", ".....", "*", "*a*", "a*", "..o..e.", "#@#@#", "[abc]..", "1221", "1.1",
+            "c.t", ".-.", "..'..",
         ];
         let words = [
+            "cat",
             "log",
+            "foible",
+            "elephant",
+            "able",
+            "reappear",
+            "abba",
+            "\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}", // ωμεγα
+            "\u{3c9}\u{3bc}",                      // ωμ
             "gol\u{df}en",
             "glo\u{e9}",
-            "foible",
-            "foible\u{e9}",
-            "\u{e9}foible",
             "f\u{f6}ible",
-            "elephant",
-            "elephant\u{e9}",
-            "singing",
+            "\u{e9}foible",
             "s\u{ed}nging",
-            "able",
             "abl\u{e9}",
-            "reappear",
             "reappe\u{e1}r",
+            "na\u{ef}vet\u{e9}ble",
+            "\u{44f}\u{44f}",
+            "\u{6f22}\u{5b57}", // яя, 漢字
+            "a\u{d7}b",
+            "12345",
+            "o'clock",
+            "fly-by-night",
         ];
         for pat in pats {
-            let m = compile_pattern(pat).unwrap();
+            let plain = compile_pattern(pat).unwrap();
+            let wrapped = compile_pattern(&format!("({pat})")).unwrap();
             for w in words {
-                if m(w).is_some() {
-                    assert!(
-                        w.is_ascii(),
-                        "{pat} matched the non-ASCII word {w:?}, which breaks the \
-                         byte-offset argument the engine is built on"
-                    );
-                }
+                assert_eq!(
+                    plain(w).is_some(),
+                    wrapped(w).is_some(),
+                    "{pat} and ({pat}) disagree on {w:?}"
+                );
             }
         }
     }
 
     #[test]
-    fn test_subpattern_rejects_non_ascii_words_without_panicking() {
-        // The engine slices by byte offset, which is only safe because nothing
-        // it matches is non-ASCII: every token demands an ASCII byte, and a pure
-        // block's pool rejects `has_other`. So a word carrying a multi-byte char
-        // has to fall out, and — the part worth a test — fall out without
-        // panicking on a slice that lands mid-character.
+    fn test_subpattern_cuts_land_on_character_boundaries() {
+        // The walker indexes characters, so a cut can no longer land inside a
+        // multi-byte character — the failure the old `from_utf8` guard existed
+        // to turn into a non-match. `Text::slice` makes it impossible instead.
+        //
+        // These are the words that used to be rejected for being non-ASCII and
+        // must now be judged on their letters like any others.
         let m = compile_pattern("(;oif)(;bel)").unwrap();
+        // Six characters, but not the right ones in the right halves.
         assert!(m("f\u{f6}ible").is_none());
-        // Six *bytes*, five chars, so it clears the length early-out and reaches
-        // the walker, whose first cut at byte 3 lands inside the `\u{f6}`.
+        // Five characters, so the length filter rejects it — in the right unit.
         assert!(m("\u{f6}ible").is_none());
-        assert!(m("\u{e9}\u{e9}\u{e9}").is_none());
-        // The two engines no longer agree here, and that is the documented split:
-        // the regex path's `*` is `\p{Alphabetic}*` and accepts a non-Latin
-        // letter, while this one is still byte-indexed and cannot. Words reaching
-        // a real search are folded first, so in practice this only shows up for a
-        // script the fold leaves non-ASCII.
+        assert!(m("foible").is_some());
+
+        // A subpattern whose cut falls between two multi-byte characters.
+        let greek = compile_pattern("(;\u{3c9}\u{3bc}\u{3b5})(;\u{3b3}\u{3b1})").unwrap();
+        assert!(greek("\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}").is_some()); // ωμε|γα
+        assert!(greek("\u{3b3}\u{3b1}\u{3c9}\u{3bc}\u{3b5}").is_none()); // right letters, wrong halves
+
+        // And the split the two engines used to disagree about.
         assert!(compile_pattern("*ble").unwrap()("na\u{ef}vet\u{e9}ble").is_some());
-        assert!(compile_pattern("*(;bel)").unwrap()("na\u{ef}vet\u{e9}ble").is_none());
+        assert!(compile_pattern("*(;bel)").unwrap()("na\u{ef}vet\u{e9}ble").is_some());
         assert!(compile_pattern("*(;bel)").unwrap()("able").is_some());
     }
-
-    // --- Work limits on the structural path ---
 
     #[test]
     fn test_structural_nesting_depth_is_capped() {

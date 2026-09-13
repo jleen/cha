@@ -122,6 +122,11 @@ stay Latin-only — there is no locale-free answer to whether `ω` is a vowel.
 Anything that is not a letter, in any script, is treated as `cha` has always
 treated `7` and `/`.
 
+This holds across the whole syntax — templates, anagrams, subpatterns, digit
+variables and `` `N `` alike. `.....`, `` .....`1 `` and `(.....)` all match
+ΩΜΈΓΑ. (One corner does not: a digit variable spent inside an anagram pool, as in
+`(1234)(;1234)`, only matches Latin letters.)
+
 ### Subpatterns
 
 Parentheses in the template introduce a **subpattern**: a whole pattern applied
