@@ -1,6 +1,5 @@
-use fancy_regex::RegexBuilder;
+use regex::RegexBuilder;
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use crate::limits::Limits;
 
@@ -268,24 +267,45 @@ fn compile_one_pattern(pattern: &str, limits: &Limits) -> Result<(Matcher, bool)
     } else {
         // Template: contentless when it is empty after stripping any fuzz suffix.
         let contentless = split_fuzz(pattern)?.0.is_empty();
-        Ok((compile_template(pattern, limits)?, contentless))
+        Ok((compile_template(pattern)?, contentless))
     }
 }
 
 /// Whether this part needs the structural engine rather than one of the three
 /// older ones.
 ///
-/// Two triggers, both of them syntax that was a hard error before subpatterns:
-/// a `(...)` group in the *template* half (in the pool half, `(...)` is the
-/// long-standing "contains this substring" marker and keeps that meaning), and
-/// a digit in the pool half, which is what lets a variable bound by the
-/// template be spent as a pool letter.
+/// Three triggers. A `(...)` group in the *template* half (in the pool half,
+/// `(...)` is the long-standing "contains this substring" marker and keeps that
+/// meaning), and a digit in the pool half, which is what lets a variable bound
+/// by the template be spent as a pool letter — both syntax that was a hard error
+/// before subpatterns existed.
+///
+/// And two that are older than subpatterns and moved here on measurement.
+///
+/// `` `N `` used to have an engine of its own, but `Tok` was always `FuzzTok`
+/// plus two variants and `walk` always `fuzzy_match` plus an environment and a
+/// cut — duplication rather than specialization. `walk` carrying the mismatch
+/// budget retires it, with the syntax surface unchanged; see `compile_node` for
+/// the restrictions it inherits.
+///
+/// **Digit variables**, because `Var` is simply better at them than a regex is.
+/// `fancy-regex` pays for itself only while it stays on the linear `regex` crate
+/// (`RegexImpl::Wrap`), which is exactly the no-digit case; one digit drops it
+/// onto the backtracking VM, and there a plain array store wins by 1.2x on
+/// `1221`, 2.8x on `1234321`, 5.4x on `1*1` and 9.3x on `*1*2*1*2*` — measured,
+/// same match counts. The gap widens with the shape: `*1*2*3*4*1*2*3*4*` took
+/// 1_972 ms and silently returned 566 of its 579 matches, and takes 57 ms here
+/// for all 579. Templates with a star and no digit stay on the regex path, where
+/// the linear engine is 1.9-2.9x ahead and this walker has no answer.
 fn needs_structural(pattern: &str) -> bool {
     let (template, pool) = match find_top_level(pattern, ';') {
         Some(idx) => (&pattern[..idx], &pattern[idx + 1..]),
         None => (pattern, ""),
     };
-    template.contains('(') || pool.chars().any(|c| c.is_ascii_digit())
+    template.contains('(')
+        || template.contains('`')
+        || template.chars().any(|c| c.is_ascii_digit())
+        || pool.chars().any(|c| c.is_ascii_digit())
 }
 
 /// Whether an anagram pool contains no matchable tokens — no letters, wildcards
@@ -321,35 +341,23 @@ fn split_fuzz(template: &str) -> Result<(&str, Option<usize>), PatternError> {
     }
 }
 
-// We use one of two different matchers depending on whether or not there’s fuzz.
-// If no fuzz, we use fancy_regex, which efficiently handles e.g. multiple *’s.
-// But it can’t directly handle fuzz letters, so we’d have to blow it into N choose F
-// many alternatives for N literals with a fuzz of F.
-//
-// So when there’s fuzz, we use our own naïve matching implementation, which is
-// inefficient on * wildcards but is efficient on fuzzy matches (just keeping a running
-// tally and doing backtracking).
-fn compile_template(template: &str, limits: &Limits) -> Result<Matcher, PatternError> {
-    let (base, fuzz) = split_fuzz(template)?;
-    // `N > 0` enables fuzzy matching; `` `0 `` is exact, so it falls through to the
-    // regular regex path — which is also the path every fuzz-free template takes,
-    // unchanged, so existing patterns are never rerouted.
-    if let Some(k) = fuzz {
-        if k > 0 {
-            return compile_fuzzy_template(base, k, limits);
-        }
-    }
-    let (regex_str, fixed_len) = template_to_regex(base)?;
-    // `template_to_regex` maps every `*` to `[a-z]*`, so a star-heavy template
-    // like `**********cat` costs the engine work superlinear in the star count,
-    // *per word*, across the whole list. Cap the backtracking rather than let a
-    // short pattern wedge the app; the `unwrap_or(false)` below degrades a word
-    // that exceeds the cap to "no match", which keeps the hot path free of
-    // `Result` handling (see the module's performance notes).
+fn compile_template(template: &str) -> Result<Matcher, PatternError> {
+    // Every `` `N `` template routes to the structural engine (see
+    // `needs_structural`), so a fuzz suffix cannot reach here.
+    debug_assert!(
+        !template.contains('`'),
+        "a fuzz suffix should have routed to the structural engine"
+    );
+    let (regex_str, fixed_len) = template_to_regex(template)?;
+    // Nothing reaching here can backtrack. Digit variables were the only source
+    // of backreferences, and they compile to `Tok::Var` on the structural engine
+    // now, so what is left is a pure DFA language and `regex` matches it in
+    // linear time with no ceiling to trip. That is why this path cannot silently
+    // truncate a result set, and why it no longer needs a `Limits` field: the
+    // engine's own guarantee replaces the one we used to have to impose.
     let re = RegexBuilder::new(&format!("(?i)^{}$", regex_str))
-        .backtrack_limit(limits.backtrack_limit)
         .build()
-        .map_err(|e| PatternError(format!("Invalid template '{}': {}", base, e)))?;
+        .map_err(|e| PatternError(format!("Invalid template '{}': {}", template, e)))?;
     Ok(Box::new(move |word: &str| {
         // Reject on length before invoking the regex engine. A star-free template
         // matches exactly one length, and on a large list the overwhelming
@@ -366,31 +374,12 @@ fn compile_template(template: &str, limits: &Limits) -> Result<Matcher, PatternE
                 return None;
             }
         }
-        if re.is_match(word).unwrap_or(false) {
+        if re.is_match(word) {
             Some(MatchInfo::default())
         } else {
             None
         }
     }))
-}
-
-/// A single template position, for the fuzzy matcher. Only `Lit` positions are
-/// allowed to mismatch (and only up to the fuzz budget); everything else is rigid.
-enum FuzzTok {
-    /// A literal letter (lowercased). Fuzzable: may mismatch, costing one budget.
-    Lit(u8),
-    /// Punctuation (`-`, `'`, space). Rigid.
-    Punct(u8),
-    /// `.` — any letter.
-    Any,
-    /// `@` — a vowel.
-    Vowel,
-    /// `#` — a consonant.
-    Consonant,
-    /// `[abc]` — one letter from the set (lowercased bytes).
-    Class(Vec<u8>),
-    /// `*` — zero or more letters.
-    Star,
 }
 
 fn is_vowel(b: u8) -> bool {
@@ -443,175 +432,6 @@ fn collapse_gap_run(chars: &[char], i: &mut usize) -> usize {
     dots
 }
 
-/// Tokenize a template for fuzzy matching. Rejects digit variables (whose
-/// backreference semantics don't compose cleanly with a mismatch budget).
-fn tokenize_fuzzy(template: &str) -> Result<Vec<FuzzTok>, PatternError> {
-    let mut out = Vec::new();
-    let chars: Vec<char> = template.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '.' => out.push(FuzzTok::Any),
-            '*' => {
-                // The run normalizes to its dots followed by one star; see
-                // `collapse_gap_run`. Emitting the dots first is the whole
-                // rewrite — they commute with the star.
-                let dots = collapse_gap_run(&chars, &mut i);
-                for _ in 0..dots {
-                    out.push(FuzzTok::Any);
-                }
-                out.push(FuzzTok::Star);
-            }
-            '@' => out.push(FuzzTok::Vowel),
-            '#' => out.push(FuzzTok::Consonant),
-            '[' => {
-                let rel = chars[i..]
-                    .iter()
-                    .position(|&x| x == ']')
-                    .ok_or_else(|| PatternError("Unclosed '[' in template".to_string()))?;
-                let j = i + rel;
-                let mut set = Vec::new();
-                for &ch in &chars[i + 1..j] {
-                    if !ch.is_ascii() {
-                        return Err(PatternError(
-                            "Fuzzy matching ('`N') supports only ASCII letters".to_string(),
-                        ));
-                    }
-                    set.push(ch.to_ascii_lowercase() as u8);
-                }
-                out.push(FuzzTok::Class(set));
-                i = j;
-            }
-            c if c.is_ascii_digit() => {
-                // Backreferences are intentionally left to the regex path (see
-                // `compile_template`); they don't compose with a mismatch budget.
-                return Err(PatternError(
-                    "Fuzzy matching ('`N') is not supported with digit variables".to_string(),
-                ));
-            }
-            c @ ('-' | '\'' | ' ') => out.push(FuzzTok::Punct(c as u8)),
-            c if c.is_ascii_alphabetic() => out.push(FuzzTok::Lit(c.to_ascii_lowercase() as u8)),
-            c if c.is_alphabetic() => {
-                return Err(PatternError(
-                    "Fuzzy matching ('`N') supports only ASCII letters".to_string(),
-                ))
-            }
-            c => {
-                return Err(PatternError(format!(
-                    "Template has meaningless character '{}'",
-                    c
-                )))
-            }
-        }
-        i += 1;
-    }
-    Ok(out)
-}
-
-/// Match `w` against `toks` starting at token `ti` / byte `ci`, where up to `budget`
-/// literal positions are permitted to mismatch. Allocation-free; the only branching
-/// is `*` backtracking, so a star-free template is a straight O(len) walk.
-///
-/// Recurses rather than looping (the `*` arm needs to backtrack). We don't rely on
-/// tail-call optimization: every call increases `ti + ci` by at least one, so the
-/// recursion depth is bounded by `toks.len() + w.len()` — a few dozen frames for any
-/// real word, nowhere near a stack concern.
-fn fuzzy_match(
-    toks: &[FuzzTok],
-    w: &[u8],
-    ti: usize,
-    ci: usize,
-    budget: usize,
-    steps: &mut u32,
-) -> bool {
-    // `steps` bounds the *number of nodes explored*, which is a different
-    // quantity from `budget` (the fuzz allowance) and from the recursion depth
-    // reasoned about above. Depth is naturally bounded; branching is not — the
-    // `Star` arm below recurses twice, so a star-heavy template is exponential
-    // with nothing underneath it to stop, unlike the regex path which at least
-    // has fancy-regex's own limiter. Exhausting the budget reports "no match",
-    // matching how the regex path degrades when it hits `backtrack_limit`.
-    if *steps == 0 {
-        return false;
-    }
-    *steps -= 1;
-    if ti == toks.len() {
-        return ci == w.len();
-    }
-    match &toks[ti] {
-        FuzzTok::Star => {
-            // Match zero letters here, or consume one letter and stay on the star.
-            if fuzzy_match(toks, w, ti + 1, ci, budget, steps) {
-                return true;
-            }
-            ci < w.len()
-                && w[ci].to_ascii_lowercase().is_ascii_lowercase()
-                && fuzzy_match(toks, w, ti, ci + 1, budget, steps)
-        }
-        tok => {
-            if ci >= w.len() {
-                return false;
-            }
-            let c = w[ci].to_ascii_lowercase();
-            let satisfied = match tok {
-                FuzzTok::Lit(l) => {
-                    if c != *l {
-                        // A literal mismatch is allowed only while budget remains, and
-                        // only onto a letter (mirroring the wildcard a freed slot becomes).
-                        return budget > 0
-                            && c.is_ascii_lowercase()
-                            && fuzzy_match(toks, w, ti + 1, ci + 1, budget - 1, steps);
-                    }
-                    true
-                }
-                FuzzTok::Punct(p) => c == *p,
-                FuzzTok::Any => c.is_ascii_lowercase(),
-                FuzzTok::Vowel => is_vowel(c),
-                FuzzTok::Consonant => c.is_ascii_lowercase() && !is_vowel(c),
-                FuzzTok::Class(set) => set.contains(&c),
-                FuzzTok::Star => unreachable!(),
-            };
-            satisfied && fuzzy_match(toks, w, ti + 1, ci + 1, budget, steps)
-        }
-    }
-}
-
-fn compile_fuzzy_template(
-    template: &str,
-    fuzz: usize,
-    limits: &Limits,
-) -> Result<Matcher, PatternError> {
-    let toks = tokenize_fuzzy(template)?;
-    let max_steps = limits.max_fuzzy_steps;
-    // The same length filter the regex path uses, and exact here rather than
-    // approximate. `fuzzy_match` is byte-indexed and every token except `Star`
-    // consumes exactly one byte, so a star-free template matches only words of
-    // exactly `toks.len()` bytes. No `is_ascii` caveat is needed: `tokenize_fuzzy`
-    // rejects non-ASCII templates, and every arm of the matcher — the fuzzed
-    // literal-mismatch arm included — requires an ASCII byte, so a word carrying
-    // a multi-byte char cannot match at any length. Fuzz does not widen this:
-    // the budget lets a position mismatch, never disappear.
-    let fixed_len = (!toks.iter().any(|t| matches!(t, FuzzTok::Star))).then_some(toks.len());
-    Ok(Box::new(move |word: &str| {
-        // Reject on length before recursing. This is the whole cost of the scan
-        // for a star-free fuzzy pattern on a large list: almost every word is the
-        // wrong length, and an integer compare replaces a walk of the template.
-        if let Some(n) = fixed_len {
-            if word.len() != n {
-                return None;
-            }
-        }
-        // Fresh budget per word: the limit bounds the cost of one candidate, not
-        // of the whole scan, so a pathological word can't starve later ones.
-        let mut steps = max_steps;
-        if fuzzy_match(&toks, word.as_bytes(), 0, 0, fuzz, &mut steps) {
-            Some(MatchInfo::default())
-        } else {
-            None
-        }
-    }))
-}
-
 fn escape_in_char_class(c: char) -> String {
     if matches!(c, ']' | '\\' | '^' | '-') {
         format!("\\{}", c)
@@ -631,7 +451,6 @@ fn escape_in_char_class(c: char) -> String {
 fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternError> {
     let mut out = String::new();
     let mut fixed_len: Option<usize> = Some(0);
-    let mut seen_vars: HashMap<char, bool> = HashMap::new();
     let chars: Vec<char> = template.chars().collect();
     let mut i = 0;
 
@@ -685,14 +504,19 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
                 i = j;
             }
             c if c.is_ascii_digit() => {
-                consume_one!();
-                let name = format!("v{}", c);
-                if let std::collections::hash_map::Entry::Vacant(e) = seen_vars.entry(c) {
-                    e.insert(true);
-                    out.push_str(&format!("(?P<{}>[a-z])", name));
-                } else {
-                    out.push_str(&format!("(?P={})", name));
-                }
+                // Unreachable: `needs_structural` claims every template with a
+                // digit. This used to emit a named group and a backreference,
+                // which is what forced `fancy-regex` on the crate; erroring
+                // instead keeps the claim that nothing here can backtrack true
+                // by construction rather than by convention.
+                debug_assert!(
+                    false,
+                    "a digit variable should have routed to the structural engine"
+                );
+                return Err(PatternError(format!(
+                    "Template has meaningless character '{}'",
+                    c
+                )));
             }
             c @ ('-' | '\'' | ' ') => {
                 out.push('\\');
@@ -710,7 +534,7 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
                 } else {
                     fixed_len = None;
                 }
-                out.push_str(&fancy_regex::escape(&lowered));
+                out.push_str(&regex::escape(&lowered));
             }
             c => {
                 return Err(PatternError(format!(
@@ -1148,8 +972,7 @@ fn compile_anagram(
         pool.vars.is_empty(),
         "a pool variable should have routed to the structural engine"
     );
-    let template_matcher: Option<Matcher> =
-        template.map(|t| compile_template(t, limits)).transpose()?;
+    let template_matcher: Option<Matcher> = template.map(compile_template).transpose()?;
 
     Ok(Box::new(move |candidate: &str| {
         if let Some(ref tm) = template_matcher {
@@ -1225,6 +1048,12 @@ enum Tok {
 struct Node {
     toks: Vec<Tok>,
     pool: Option<Pool>,
+    /// `` `N ``: how many `Lit` positions may mismatch. 0 for an exact node.
+    ///
+    /// Per node, and re-armed by `match_node`, so it means the same thing here
+    /// as it did when the fuzzy path was its own engine: a budget for one
+    /// template, not for one word.
+    fuzz: usize,
     /// True when there is no template half at all (`(;oif)`), so the token list
     /// imposes nothing and the pool alone fixes the length.
     pure: bool,
@@ -1232,11 +1061,27 @@ struct Node {
     /// open-ended.
     min: usize,
     max: Option<usize>,
-    /// `suffix_min[i]`/`suffix_max[i]`: what the tokens from `i` onward need.
-    /// Indexed up to and including `toks.len()`, so the walker can prune before
-    /// looking at a token as well as after the last one.
-    suffix_min: Vec<usize>,
-    suffix_max: Vec<Option<usize>>,
+    /// `max == Some(min)`: every element has a fixed width, so the slice length
+    /// is decided before the walk starts.
+    ///
+    /// Worth a field because it lets the walker skip its length prune entirely.
+    /// For a rigid node the prune is provably redundant — the caller only ever
+    /// hands it a slice of exactly `min` bytes, and every token consumes one — so
+    /// it is two loads and two compares per node buying nothing. That is most of
+    /// what the merged fuzzy path was paying: `` cathode`1 `` walks seven rigid
+    /// tokens per candidate and nothing else.
+    rigid: bool,
+    /// `suffix[i]` is `(min, max)` bytes the tokens from `i` onward need, with
+    /// `usize::MAX` for "unbounded". Indexed up to and including `toks.len()`,
+    /// so the walker can prune before looking at a token as well as after the
+    /// last one.
+    ///
+    /// One packed slice rather than two vectors of `Option<usize>`: the walker
+    /// reads both halves at every node, so this is one bounds check and one
+    /// cache line instead of two of each, and the sentinel turns a discriminant
+    /// branch into a compare. Worth about 10% on the cheapest patterns, which is
+    /// where per-node overhead is all there is.
+    suffix: Box<[(usize, usize)]>,
 }
 
 impl Node {
@@ -1249,6 +1094,11 @@ impl Node {
         }) || self.pool.as_ref().is_some_and(|p| p.has_content())
     }
 }
+
+/// Stands in for "no upper bound" in a `Node`'s packed suffix table. A real
+/// bound can never reach it: bounds are byte counts, summed over a token list
+/// whose length is capped by `max_pattern_len`.
+const UNBOUNDED: usize = usize::MAX;
 
 /// Byte length one token can cover.
 fn tok_bounds(t: &Tok) -> (usize, Option<usize>) {
@@ -1368,12 +1218,30 @@ fn compile_node(src: &str, limits: &Limits) -> Result<Node, PatternError> {
         Some(idx) => (&src[..idx], Some(&src[idx + 1..])),
         None => (src, None),
     };
+    // A `` `N `` suffix belongs to this node's template. `split_fuzz` also
+    // reports the malformed spellings (`` `` ``, a bare `` ` ``, a
+    // non-numeric count), which must keep erroring exactly as before.
+    let (tpl, fuzz) = split_fuzz(tpl)?;
+    if fuzz.is_some() && pool_src.is_some() {
+        return Err(PatternError(
+            "Fuzzy matching ('`N') is not supported in an anagram template".to_string(),
+        ));
+    }
+    let fuzz = fuzz.unwrap_or(0);
     let pure = pool_src.is_some() && tpl.is_empty();
     let toks = if pure {
         Vec::new()
     } else {
         tokenize_structural(tpl, limits)?
     };
+    if fuzz > 0 && toks.iter().any(|t| matches!(t, Tok::Var(_))) {
+        // Backreference semantics don't compose cleanly with a mismatch budget:
+        // it is not clear whether a fuzzed position should still bind. Held as an
+        // error rather than guessed at, which is where it has always been.
+        return Err(PatternError(
+            "Fuzzy matching ('`N') is not supported with digit variables".to_string(),
+        ));
+    }
     let pool = pool_src
         .map(|p| parse_pool(if pure { None } else { Some(tpl) }, p, limits))
         .transpose()?;
@@ -1381,33 +1249,38 @@ fn compile_node(src: &str, limits: &Limits) -> Result<Node, PatternError> {
     // Suffix bounds, right to left. These are the whole reason a fixed-length
     // composition costs a walk rather than a search.
     let n = toks.len();
-    let mut suffix_min = vec![0usize; n + 1];
-    let mut suffix_max = vec![Some(0usize); n + 1];
+    let mut suffix = vec![(0usize, 0usize); n + 1];
     for i in (0..n).rev() {
         let (lo, hi) = tok_bounds(&toks[i]);
-        suffix_min[i] = suffix_min[i + 1] + lo;
-        suffix_max[i] = match (hi, suffix_max[i + 1]) {
-            (Some(a), Some(b)) => Some(a + b),
-            _ => None,
-        };
+        let (rest_min, rest_max) = suffix[i + 1];
+        suffix[i] = (
+            rest_min + lo,
+            match hi {
+                Some(h) if rest_max != UNBOUNDED => h + rest_max,
+                _ => UNBOUNDED,
+            },
+        );
     }
+    let suffix: Box<[(usize, usize)]> = suffix.into_boxed_slice();
 
     let (min, max) = if pure {
         // No template, so the pool alone says how many letters this spends.
         let pool = pool.as_ref().expect("pure implies a pool");
         (pool.min_spend(), pool.spend())
     } else {
-        (suffix_min[0], suffix_max[0])
+        let (lo, hi) = suffix[0];
+        (lo, (hi != UNBOUNDED).then_some(hi))
     };
 
     Ok(Node {
         toks,
         pool,
+        fuzz,
         pure,
         min,
         max,
-        suffix_min,
-        suffix_max,
+        rigid: max == Some(min),
+        suffix,
     })
 }
 
@@ -1454,157 +1327,222 @@ fn slice_str(w: &[u8], start: usize, end: usize) -> Option<&str> {
     std::str::from_utf8(&w[start..end]).ok()
 }
 
-/// Match `node`'s tokens from token `ti` / byte `ci`, filling exactly up to
-/// `end`. Returns the environment as extended by this stretch, plus the detail
-/// its subpatterns reported.
-fn walk(
-    node: &Node,
-    w: &[u8],
-    ti: usize,
-    ci: usize,
-    end: usize,
+/// One word's worth of matching state, so the recursion carries pointers rather
+/// than payload.
+///
+/// Everything that would otherwise be threaded through `walk`'s signature or its
+/// return value lives here, because this engine now carries the fuzzy path too
+/// and that path is dominated by per-node overhead. Two things in particular:
+///
+/// - **`walk` returns `bool`**, as `fuzzy_match` did. Returning `Option<Env>`
+///   moved eleven bytes out of every node; the environment instead lives here
+///   and is restored by the two arms that can change it.
+/// - **The detail is accumulated in byte buffers, not `String`s.** It is
+///   appended to rather than returned, and a failed branch rewinds to a recorded
+///   length — and `Vec<u8>::truncate` is a length store where `String::truncate`
+///   asserts a char boundary first. Every letter here comes from `diff_letters`,
+///   so it is ASCII by construction.
+struct Walker<'w> {
+    w: &'w [u8],
+    /// Nodes left in this word's budget. See `Limits::max_structural_steps`.
+    steps: u32,
+    /// Digit variable bindings, restored on backtracking rather than copied down.
     env: Env,
-    steps: &mut u32,
-) -> Option<(Env, MatchInfo)> {
-    // Bounds the number of nodes explored, per word, re-armed for each. Both
-    // the `Star` and the `Sub` arm below branch, so without this a pattern like
-    // `*(;ab)*(;cd)*` is exponential with nothing underneath it to stop.
-    // Exhausting the budget reports "no match", as every other match-time limit
-    // in the crate does.
-    if *steps == 0 {
-        return None;
-    }
-    *steps -= 1;
-
-    // What is left has to be something the remaining tokens can cover. Applied
-    // before the token is even looked at, this is what collapses an all-fixed
-    // composition to a single forced cut.
-    let left = end - ci;
-    if left < node.suffix_min[ti] {
-        return None;
-    }
-    if node.suffix_max[ti].is_some_and(|mx| left > mx) {
-        return None;
-    }
-
-    if ti == node.toks.len() {
-        // The pruning above already proved `ci == end`.
-        return Some((env, MatchInfo::default()));
-    }
-
-    match &node.toks[ti] {
-        Tok::Star => {
-            // Match zero letters here, or consume one letter and stay on the star.
-            if let Some(r) = walk(node, w, ti + 1, ci, end, env, steps) {
-                return Some(r);
-            }
-            if ci < end && w[ci].to_ascii_lowercase().is_ascii_lowercase() {
-                walk(node, w, ti, ci + 1, end, env, steps)
-            } else {
-                None
-            }
-        }
-        Tok::Sub(sub) => {
-            // Only cuts that leave the rest of the tokens satisfiable are worth
-            // trying, so this window is usually a single offset.
-            let rest_min = node.suffix_min[ti + 1];
-            let lo = ci + sub.min;
-            // `end - rest_min` cannot underflow: the suffix_min prune above
-            // already established `end - ci >= sub.min + rest_min`.
-            let hi = sub.max.map_or(end, |m| ci + m).min(end - rest_min);
-            let mut cut = lo;
-            while cut <= hi {
-                if let Some((env2, mut info)) = match_node(sub, w, ci, cut, env, steps) {
-                    if let Some((env3, rest)) = walk(node, w, ti + 1, cut, end, env2, steps) {
-                        info.unused.push_str(&rest.unused);
-                        info.extra.push_str(&rest.extra);
-                        return Some((env3, info));
-                    }
-                }
-                cut += 1;
-            }
-            None
-        }
-        tok => {
-            if ci >= end {
-                return None;
-            }
-            let c = w[ci].to_ascii_lowercase();
-            let mut env2 = env;
-            let satisfied = match tok {
-                Tok::Lit(l) => c == *l,
-                Tok::Punct(p) => c == *p,
-                Tok::Any => c.is_ascii_lowercase(),
-                Tok::Vowel => is_vowel(c),
-                Tok::Consonant => c.is_ascii_lowercase() && !is_vowel(c),
-                Tok::Class(set) => set.contains(&c),
-                Tok::Var(d) => {
-                    let slot = &mut env2[*d as usize];
-                    if !c.is_ascii_lowercase() {
-                        false
-                    } else if *slot == 0 {
-                        *slot = c;
-                        true
-                    } else {
-                        *slot == c
-                    }
-                }
-                Tok::Star | Tok::Sub(_) => unreachable!("handled above"),
-            };
-            if satisfied {
-                walk(node, w, ti + 1, ci + 1, end, env2, steps)
-            } else {
-                None
-            }
-        }
-    }
+    unused: Vec<u8>,
+    extra: Vec<u8>,
 }
 
-/// Match one whole node against the slice `start..end`.
-fn match_node(
-    node: &Node,
-    w: &[u8],
-    start: usize,
-    end: usize,
-    env: Env,
-    steps: &mut u32,
-) -> Option<(Env, MatchInfo)> {
-    if *steps == 0 {
-        return None;
+/// Lengths to rewind a `Walker`'s detail buffers to when a branch fails.
+#[derive(Clone, Copy)]
+struct Mark(usize, usize);
+
+impl Walker<'_> {
+    fn mark(&self) -> Mark {
+        Mark(self.unused.len(), self.extra.len())
     }
-    *steps -= 1;
 
-    let mut info = MatchInfo::default();
-    let mut pool_checked = false;
+    fn rewind(&mut self, m: Mark) {
+        self.unused.truncate(m.0);
+        self.extra.truncate(m.1);
+    }
 
-    // A pool with no variables depends only on the slice's letter counts, so it
-    // is a cheap count-based filter and belongs *before* the walk. One that
-    // spends variables has to wait for the template to bind them.
-    if let Some(pool) = &node.pool {
-        if pool.vars.is_empty() {
-            info = pool.check(slice_str(w, start, end)?, &NO_VARS)?;
-            pool_checked = true;
+    fn push(&mut self, detail: &MatchInfo) {
+        self.unused.extend_from_slice(detail.unused.as_bytes());
+        self.extra.extend_from_slice(detail.extra.as_bytes());
+    }
+
+    /// The accumulated detail, once the whole word has matched.
+    fn finish(self) -> MatchInfo {
+        // Every byte came from `diff_letters`, which emits `b'A'..=b'Z'`.
+        MatchInfo {
+            unused: String::from_utf8(self.unused).unwrap_or_default(),
+            extra: String::from_utf8(self.extra).unwrap_or_default(),
         }
     }
 
-    let env = if node.pure {
-        env
-    } else {
-        let (env, sub) = walk(node, w, 0, start, end, env, steps)?;
-        info.unused.push_str(&sub.unused);
-        info.extra.push_str(&sub.extra);
-        env
-    };
+    /// Match `node`'s tokens from token `ti` / byte `ci`, filling exactly up to
+    /// `end`.
+    ///
+    /// Recurses rather than looping, because `Star` and `Sub` both need to
+    /// backtrack. Depth is bounded by `toks.len() + w.len()` — every call
+    /// advances `ti` or `ci` — so it is the node *count* that needs a ceiling,
+    /// not the depth; `steps` is that ceiling.
+    fn walk(&mut self, node: &Node, ti: usize, ci: usize, end: usize, fuzz: usize) -> bool {
+        // Bounds the nodes explored per word, re-armed for each. Both the `Star`
+        // and the `Sub` arm below branch, so without this a pattern like
+        // `*(;ab)*(;cd)*` is exponential with nothing underneath it to stop.
+        // Exhausting the budget reports "no match", as every other match-time
+        // limit in the crate does.
+        if self.steps == 0 {
+            return false;
+        }
+        self.steps -= 1;
 
-    if !pool_checked {
+        // What is left has to be something the remaining tokens can cover.
+        // Applied before the token is even looked at, this is what collapses a
+        // composition with an open-ended element to a single forced cut — and it
+        // is exactly why a rigid node does not need it. See `Node::rigid`.
+        if !node.rigid {
+            let (need_min, need_max) = node.suffix[ti];
+            let left = end - ci;
+            if left < need_min || left > need_max {
+                return false;
+            }
+        }
+
+        if ti == node.toks.len() {
+            // Either the prune above proved `ci == end`, or the node is rigid and
+            // the caller sized the slice to match.
+            return true;
+        }
+
+        match &node.toks[ti] {
+            Tok::Star => {
+                // Match zero letters here, or consume one letter and stay on the
+                // star.
+                let mark = self.mark();
+                if self.walk(node, ti + 1, ci, end, fuzz) {
+                    return true;
+                }
+                self.rewind(mark);
+                ci < end
+                    && self.w[ci].to_ascii_lowercase().is_ascii_lowercase()
+                    && self.walk(node, ti, ci + 1, end, fuzz)
+            }
+            Tok::Sub(sub) => {
+                // Only cuts that leave the rest of the tokens satisfiable are
+                // worth trying, so this window is usually a single offset.
+                // `end - rest_min` cannot underflow: the prune above already
+                // established `end - ci >= sub.min + rest_min`.
+                let rest_min = node.suffix[ti + 1].0;
+                let lo = ci + sub.min;
+                let hi = sub.max.map_or(end, |m| ci + m).min(end - rest_min);
+                let mark = self.mark();
+                let saved = self.env;
+                let mut cut = lo;
+                while cut <= hi {
+                    if self.match_node(sub, ci, cut) && self.walk(node, ti + 1, cut, end, fuzz) {
+                        return true;
+                    }
+                    self.rewind(mark);
+                    self.env = saved;
+                    cut += 1;
+                }
+                false
+            }
+            tok => {
+                if ci >= end {
+                    return false;
+                }
+                let c = self.w[ci].to_ascii_lowercase();
+                let mut fuzz2 = fuzz;
+                let satisfied = match tok {
+                    Tok::Lit(l) => {
+                        if c == *l {
+                            true
+                        } else if fuzz > 0 && c.is_ascii_lowercase() {
+                            // A literal mismatch is allowed only while budget
+                            // remains, and only onto a letter — mirroring the
+                            // wildcard a freed slot effectively becomes.
+                            fuzz2 = fuzz - 1;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Tok::Punct(p) => c == *p,
+                    Tok::Any => c.is_ascii_lowercase(),
+                    Tok::Vowel => is_vowel(c),
+                    Tok::Consonant => c.is_ascii_lowercase() && !is_vowel(c),
+                    Tok::Class(set) => set.contains(&c),
+                    // The one arm that writes the environment, so the one arm
+                    // that has to put it back: a single slot, restored in place
+                    // rather than by copying the whole thing down the recursion.
+                    Tok::Var(d) => {
+                        let slot = *d as usize;
+                        let prev = self.env[slot];
+                        if !c.is_ascii_lowercase() {
+                            false
+                        } else if prev == 0 {
+                            self.env[slot] = c;
+                            if self.walk(node, ti + 1, ci + 1, end, fuzz) {
+                                return true;
+                            }
+                            self.env[slot] = 0;
+                            return false;
+                        } else {
+                            prev == c
+                        }
+                    }
+                    Tok::Star | Tok::Sub(_) => unreachable!("handled above"),
+                };
+                satisfied && self.walk(node, ti + 1, ci + 1, end, fuzz2)
+            }
+        }
+    }
+
+    /// Match one whole node against the slice `start..end`.
+    fn match_node(&mut self, node: &Node, start: usize, end: usize) -> bool {
+        if self.steps == 0 {
+            return false;
+        }
+        self.steps -= 1;
+
+        let mark = self.mark();
+        let mut pool_checked = false;
+
+        // A pool with no variables depends only on the slice's letter counts, so
+        // it is a cheap count-based filter and belongs *before* the walk. One
+        // that spends variables has to wait for the template to bind them.
         if let Some(pool) = &node.pool {
-            let detail = pool.check(slice_str(w, start, end)?, &env)?;
-            info.unused.push_str(&detail.unused);
-            info.extra.push_str(&detail.extra);
+            if pool.vars.is_empty() {
+                match slice_str(self.w, start, end).and_then(|s| pool.check(s, &NO_VARS)) {
+                    Some(detail) => self.push(&detail),
+                    None => return false,
+                }
+                pool_checked = true;
+            }
         }
-    }
 
-    Some((env, info))
+        if !node.pure && !self.walk(node, 0, start, end, node.fuzz) {
+            self.rewind(mark);
+            return false;
+        }
+
+        if !pool_checked {
+            if let Some(pool) = &node.pool {
+                match slice_str(self.w, start, end).and_then(|s| pool.check(s, &self.env)) {
+                    Some(detail) => self.push(&detail),
+                    None => {
+                        self.rewind(mark);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
+    }
 }
 
 fn compile_structural(pattern: &str, limits: &Limits) -> Result<(Matcher, bool), PatternError> {
@@ -1633,8 +1571,16 @@ fn compile_structural(pattern: &str, limits: &Limits) -> Result<(Matcher, bool),
             return None;
         }
         // Fresh budget per word, so a pathological word can't starve later ones.
-        let mut steps = max_steps;
-        match_node(&node, word.as_bytes(), 0, word.len(), NO_VARS, &mut steps).map(|(_, info)| info)
+        let mut walker = Walker {
+            w: word.as_bytes(),
+            steps: max_steps,
+            env: NO_VARS,
+            unused: Vec::new(),
+            extra: Vec::new(),
+        };
+        walker
+            .match_node(&node, 0, word.len())
+            .then(|| walker.finish())
     });
     Ok((matcher, contentless))
 }
@@ -2287,8 +2233,7 @@ mod tests {
         Limits {
             max_pattern_len: 64,
             max_anagram_combos: 4_096,
-            backtrack_limit: 10_000,
-            max_fuzzy_steps: 10_000,
+            max_structural_steps: 10_000,
             ..Limits::default()
         }
     }
@@ -2431,26 +2376,36 @@ mod tests {
         assert!(m("comet").is_some());
     }
 
+    /// The largest `max_structural_steps` `limitcal`'s *adversarial* tier needs
+    /// to return every match (`` *a*b*c*d*`2 ``). Re-run that example before
+    /// changing it.
+    const STRUCTURAL_FLOOR: u32 = 3_053;
+
+    /// What `*1*2*3*4*1*2*3*4*` needs. Called out separately because it is the
+    /// shape the old regex path could not return in full at any practical
+    /// ceiling — 566 of 579 matches in 1_972 ms — and covering it is a
+    /// correctness claim, not headroom.
+    const STRUCTURAL_EXTREME: u32 = 17_821;
+
     // --- The recalibrated match-time defaults ------------------------------
 
     #[test]
     fn test_default_match_time_limits_clear_the_calibrated_floors() {
         // `examples/limitcal.rs` measures the smallest limit that still returns
-        // every match, over a corpus of realistic and adversarial patterns. The
-        // adversarial worst cases are 1_315 backtrack steps (`*1*2*1*2*`) and
-        // 3_698 fuzzy steps (`` *a*b*c*d*`2 ``). These defaults were lowered from
-        // 1_000_000 apiece; this is the tripwire against lowering them into the
-        // range where they would start silently dropping real matches.
+        // every match, over a corpus of realistic and adversarial patterns. This
+        // is the tripwire against lowering a default into the range where it
+        // would start silently dropping real matches.
         let d = Limits::default();
         assert!(
-            d.backtrack_limit >= 1_315 * 4,
-            "backtrack_limit {} leaves too little headroom over the measured floor",
-            d.backtrack_limit
+            d.max_structural_steps >= STRUCTURAL_FLOOR * 4,
+            "max_structural_steps {} leaves too little headroom over the measured floor",
+            d.max_structural_steps
         );
         assert!(
-            d.max_fuzzy_steps >= 3_698 * 4,
-            "max_fuzzy_steps {} leaves too little headroom over the measured floor",
-            d.max_fuzzy_steps
+            d.max_structural_steps >= STRUCTURAL_EXTREME,
+            "max_structural_steps {} would truncate *1*2*3*4*1*2*3*4*, which is \
+             the pattern this engine exists to have fixed",
+            d.max_structural_steps
         );
     }
 
@@ -2857,12 +2812,79 @@ mod tests {
     fn test_subpattern_syntax_errors() {
         for pat in [
             "(;ab",        // unclosed
-            "(;ab)`1",     // fuzz does not compose with a block
             "(;ab)\u{e9}", // non-ASCII on this path
             "(;ab))",      // unmatched close
+            "(ab`1;cd)",   // fuzz does not compose with an anagram pool
+            "(1`1)x",      // nor with a digit variable
+            "(;ab)`",      // malformed fuzz count
+            "(;ab)`1`2",   // two fuzz suffixes
         ] {
             assert!(compile_pattern(pat).is_err(), "{pat} should be rejected");
         }
+    }
+
+    // --- Digit variables moved off the regex path ---
+
+    #[test]
+    fn test_digit_variables_run_on_the_structural_engine() {
+        // Proof the dispatch actually moved, rather than the patterns merely
+        // still working: starving the *structural* budget breaks them, which it
+        // could not do while they compiled to regex backreferences.
+        let starved = Limits {
+            max_structural_steps: 1,
+            ..Limits::default()
+        };
+        for (pat, word) in [
+            ("1221", "abba"),
+            ("1234321", "deified"),
+            ("*1*2*1*2*", "banana"),
+            ("1*1", "level"),
+        ] {
+            assert!(
+                compile_pattern_with(pat, &starved).unwrap()(word).is_none(),
+                "{pat} should be starved off the structural engine"
+            );
+            assert!(
+                compile_pattern(pat).unwrap()(word).is_some(),
+                "{pat} should match {word} under the shipped defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn test_digit_variables_agree_with_the_regex_semantics() {
+        // The move is a dispatch change, not a semantic one: a digit still means
+        // "the same letter as every other occurrence of this digit", and still
+        // composes with every other token the same way.
+        let m = compile_pattern("1221").unwrap();
+        assert!(m("abba").is_some());
+        assert!(m("abab").is_none());
+        // Distinct digits are independent variables, not distinct letters.
+        assert!(compile_pattern("11").unwrap()("aa").is_some());
+        assert!(compile_pattern("12").unwrap()("aa").is_some());
+        // Digits mix with wildcards, classes and literals.
+        assert!(compile_pattern("1.1").unwrap()("aba").is_some());
+        assert!(compile_pattern("1.1").unwrap()("abc").is_none());
+        assert!(compile_pattern("c1t;1").unwrap()("cat").is_some());
+        assert!(compile_pattern("[ab]11").unwrap()("axx").is_some());
+    }
+
+    #[test]
+    fn test_fuzz_composes_with_a_subpattern() {
+        // Merging the fuzzy tokenizer into the structural engine lifted this:
+        // the budget is per node and spends only on `Lit` positions, so a block
+        // sitting beside literals is simply rigid, like `.` or `[abc]`.
+        let exact = compile_pattern("ele(;nahpt)").unwrap();
+        let fuzzed = compile_pattern("ele(;nahpt)`1").unwrap();
+        assert!(exact("elephant").is_some());
+        assert!(fuzzed("elephant").is_some());
+        // One literal wrong: only the budgeted form takes it.
+        assert!(exact("alephant").is_none());
+        assert!(fuzzed("alephant").is_some());
+        // Two wrong is past the budget, and the block stays rigid either way.
+        assert!(fuzzed("alxphant").is_none());
+        assert!(compile_pattern("ele(;nahpt)`2").unwrap()("alxphant").is_some());
+        assert!(fuzzed("elephxnt").is_none());
     }
 
     #[test]

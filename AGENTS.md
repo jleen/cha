@@ -162,13 +162,12 @@ combinatorial path without a ceiling there.
   timeout **cannot** catch it — the check must stay where it is, before the
   product is built, and must use `checked_mul` (a wrapped value slips under the
   cap).
-- **`backtrack_limit`, `max_fuzzy_steps` and `max_structural_steps` bind per
-  candidate word**; `max_results` and `deadline` bind during the scan.
-  `max_subpattern_depth` binds at compile time. Enforcing any of them costs
-  nothing measurable — don't "optimize" them away.
-- **The match-time defaults are calibrated, not guessed.** Re-run
-  [`limitcal`](cha-core/examples/limitcal.rs) before changing any of the three,
-  and read [docs/core.md](docs/core.md) first.
+- **`max_structural_steps` binds per candidate word**; `max_results` and
+  `deadline` bind during the scan. `max_subpattern_depth` binds at compile time.
+  Enforcing any of them costs nothing measurable — don't "optimize" them away.
+- **The match-time default is calibrated, not guessed.** Re-run
+  [`limitcal`](cha-core/examples/limitcal.rs) before changing it, and read
+  [docs/core.md](docs/core.md) first.
 
 Exceeding a *match-time* limit degrades to "no match", which is what keeps the
 hot path `Result`-free. Exceeding the *compile-time* limit is a normal
@@ -217,7 +216,14 @@ Never extrapolate, estimate, or report a figure that wasn't measured.
 Two invariants worth carrying without looking them up: **resolve dispatch at
 compile time and bake it into the closure** (never branch on pattern syntax
 per word), and **keep the length early-out a pure filter** — nothing it drops
-could have matched. The rest of the pre-change checklist, the harnesses, and the
+could have matched.
+
+**There are two matching engines, and which one a pattern takes is a measured
+decision, not a historical one.** `needs_structural` routes subpatterns, digit
+variables and `` `N `` fuzz to the structural walker; everything else goes to
+`regex`, which wins on stars by 1.9-2.9x and is why the walker has not simply
+absorbed it. Moving a construct between them is a perf change *and* a
+correctness one — see [docs/core.md](docs/core.md) before you do. The rest of the pre-change checklist, the harnesses, and the
 gap-run normalization that made star-heavy patterns tractable are in
 [docs/core.md](docs/core.md).
 
@@ -279,9 +285,13 @@ keep the two transports speaking one protocol. No current argument has two words
   ceiling in `Limits`, and do not call `cartesian_product` without checking the
   product size first. See the `Limits` section — every such path is reachable
   from untrusted input by a short pattern.
-- `fancy_regex` is required (not the plain `regex` crate) because digit
-  variables (`1234321`) compile to named capture groups with backreferences,
-  which a pure DFA cannot handle.
+- **Don't put a backreference in front of the `regex` crate.** Digit variables
+  used to compile to named capture groups, which is why this crate depended on
+  `fancy_regex`; they are `Tok::Var` on the structural engine now — measured 1.2x
+  to 89x faster — and the template language left over is a pure DFA. That is what
+  lets `compile_template` claim it can never backtrack, and why `backtrack_limit`
+  no longer exists. New template syntax needing backreferences belongs on the
+  structural engine, not on a reinstated `fancy_regex`.
 - Do not build a multi-source word list by concatenating `load_words` /
   `load_words_from_str` results. Each call dedups only against its *own*
   `HashSet`, so merging their `Vec`s dedups within each source but not across

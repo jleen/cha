@@ -98,8 +98,7 @@ Usage: cargo run --release -p cha-core --example perf -- [OPTIONS]
   -h, --help         this
 
 Environment (defaults are the shipped Limits::interactive values):
-  CHA_BENCH_BACKTRACK, CHA_BENCH_FUZZY, CHA_BENCH_STRUCTURAL,
-  CHA_BENCH_MAX_RESULTS, CHA_BENCH_DEADLINE
+  CHA_BENCH_STRUCTURAL, CHA_BENCH_MAX_RESULTS, CHA_BENCH_DEADLINE
 
 Exit status: 0 ok, 1 usage or setup error, 2 timing regression, 3 match counts moved.";
 
@@ -133,15 +132,19 @@ const CORPUS: &[Probe] = &[
     // time from whether the *pattern* contains punctuation.
     Probe { tier: "punct", pattern: "...'.", exercises: "pattern has punctuation: word is borrowed, no per-word byte scan at all" },
     Probe { tier: "punct", pattern: ".........", exercises: "pattern has none: byte scan every word, allocate a String for punctuated ones" },
-    // Digit variables compile to named capture groups with backreferences, the
-    // only thing in the language that reaches fancy-regex's backtracking VM.
+    // Digit variables. These used to compile to backreferences and were the only
+    // thing in the language reaching a backtracking engine; they are `Tok::Var`
+    // on the structural engine now, which is what took this tier from 403 ms to
+    // 50 ms and let `backtrack_limit` be deleted.
     Probe { tier: "backref", pattern: "1221", exercises: "backreference, fixed length" },
     Probe { tier: "backref", pattern: "12321", exercises: "two backreferences" },
     Probe { tier: "backref", pattern: "1.2.2.1", exercises: "interleaved backreferences and wildcards" },
     Probe { tier: "backref", pattern: "*1*1", exercises: "star plus backreference: the worst realistic shape (193 steps)" },
-    Probe { tier: "backref", pattern: "*1*2*1*2*", exercises: "alternating distinct backreferences: sets the backtrack_limit floor (1_315)" },
-    // The hand-rolled fuzzy matcher. A `N > 0 suffix routes here; `0 falls
-    // through to the regex path.
+    Probe { tier: "backref", pattern: "*1*2*1*2*", exercises: "alternating distinct backreferences: was 296 ms on the regex path" },
+    // `` `N `` fuzz. This had a hand-rolled engine of its own until `Tok`/`walk`
+    // absorbed it — `Tok` was always `FuzzTok` plus two variants. The cheap
+    // entries here cost ~13% more for that merge and the expensive ones ~25%
+    // less, so keep both kinds: one tier total would hide the trade.
     Probe { tier: "fuzzy", pattern: "cathode`1", exercises: "star-free: toks.len() is an exact length, early-out applies" },
     Probe { tier: "fuzzy", pattern: "elephant`3", exercises: "star-free with a wide fuzz budget" },
     Probe { tier: "fuzzy", pattern: ".....`1", exercises: "all-wildcard fuzzy; cross-checks the match count of the `.....` template" },
@@ -664,12 +667,6 @@ fn main() {
             None => default,
         }
     };
-    let backtrack = env_usize("CHA_BENCH_BACKTRACK", base.backtrack_limit, &mut overrides);
-    let fuzzy = env_usize(
-        "CHA_BENCH_FUZZY",
-        base.max_fuzzy_steps as usize,
-        &mut overrides,
-    ) as u32;
     let structural = env_usize(
         "CHA_BENCH_STRUCTURAL",
         base.max_structural_steps as usize,
@@ -680,8 +677,6 @@ fn main() {
     // cost of *having* one rather than the cost of tripping it.
     let deadline = env_usize("CHA_BENCH_DEADLINE", 0, &mut overrides) == 1;
     let limits = Limits {
-        backtrack_limit: backtrack,
-        max_fuzzy_steps: fuzzy,
         max_structural_steps: structural,
         max_results,
         deadline: deadline.then(|| Instant::now() + Duration::from_secs(3600)),
@@ -746,9 +741,7 @@ fn main() {
         // Blocking: a different dictionary makes the timings incomparable.
         fingerprint: format!("words={} count={}", cfg.words, n),
         // Informational: reported on a mismatch, never a reason to refuse.
-        limits: format!(
-            "backtrack={backtrack} fuzzy={fuzzy} max_results={max_results} deadline={deadline}"
-        ),
+        limits: format!("structural={structural} max_results={max_results} deadline={deadline}"),
         scope: if !cfg.patterns.is_empty() {
             "adhoc".to_string()
         } else {
@@ -777,7 +770,9 @@ fn main() {
         },
         id.git
     );
-    println!("  limits       backtrack={backtrack} fuzzy={fuzzy} max_results={max_results} deadline={deadline}");
+    println!(
+        "  limits       structural={structural} max_results={max_results} deadline={deadline}"
+    );
     if !overrides.is_empty() {
         println!("  *** NON-DEFAULT LIMITS: {} ***", overrides.join(" "));
         println!("      These are not the shipped values. Not comparable to a stock baseline.");

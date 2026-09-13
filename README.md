@@ -66,8 +66,9 @@ results.  Enter `^D` on an empty line to exit.
 
 The `` `N `` syntax specifies that `N` many literals can be
 “wrong”, i.e. different from the given.  Thus `` foo`1 `` will match `foe` and `goo`.
-This has no effect on wildcards, but cannot be combined with anagrams or the `*`
-wildcard.
+Only literal letters can vary: wildcards, character classes and subpatterns are
+rigid, and spend no budget. It cannot be combined with an anagram pool or with a
+digit variable.
 
 ```
 cat`1     # CAT, BAT, CAR, COT, … (one letter off)
@@ -120,7 +121,8 @@ can ask for a word made of anagram blocks.
 
 Parentheses with no `;` inside constrain nothing, so `ele(ph)ant` is just
 `elephant`. `&` and `!` are whole-query operators and cannot appear inside a
-subpattern. `` `N `` cannot be combined with one.
+subpattern. `` `N `` can: the block stays rigid and the literals around it vary,
+so `` ele(;nahpt)`1 `` matches ELEPHANT and ALEPHANT.
 
 A digit variable is one variable across the whole pattern, so it can be bound in
 one block and spent in another — including inside an anagram pool, which is the

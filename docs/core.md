@@ -82,8 +82,8 @@ those patterns were not merely slow. `**********1**********1` returned **9_778 o
 25_193** real matches, because a word that exceeds a per-word limit degrades to
 "no match" rather than erroring. Truncation and slowness have the same cause and
 opposite signatures, so a timing-only harness reads a truncating regression as an
-improvement. Demonstrably: with `max_fuzzy_steps` cut to 200, `` *a*b*c*d*`2 ``
-gets **53% faster** and loses 4_843 matches.
+improvement. Demonstrably: with `max_structural_steps` cut to 200,
+`` *a*b*c*d*`2 `` gets **53% faster** and loses 4_843 matches.
 
 This is also why only the **word list** blocks a comparison. Differing limits are
 reported as context and the diff proceeds — "I lowered a limit, did it truncate?"
@@ -181,21 +181,21 @@ and the reject path cannot.
   Never branch on pattern syntax per word. `has_punct`, `fixed_len`,
   `combo_pools`, `is_pure` and `collapse_gap_run` are all this pattern; syntax
   that re-inspects itself inside the closure is the likeliest way to regress.
-- **Decide which of the four engines the new syntax joins** — the regex
-  template, the fuzzy tokenizer, the anagram pool, or the structural matcher —
-  and if it can't join one, reject it *there* at compile time rather than
-  half-supporting it. Precedent: digit variables are refused on the fuzzy path
-  because backreferences don't compose with a mismatch budget, and fuzz is
-  refused on the structural path because a per-node mismatch budget doesn't
-  compose with a split search.
-- **A new fuzzy token that consumes anything other than exactly one byte
-  invalidates two arguments at once**: `toks.len()` as the exact match length,
-  and the reason the fuzzy early-out needs no `is_ascii` guard. Audit both, or
-  the early-out stops being a pure filter.
+- **Decide which of the two engines the new syntax joins** — `regex` or the
+  structural walker (the anagram `Pool` is a component of the second, not a third
+  engine) — and if it can't join either, reject it *there* at compile time rather
+  than half-supporting it. Precedent: fuzz is refused alongside a digit variable
+  in the same node, because it is not clear whether a fuzzed position should
+  still bind.
+- **A new `Tok` that consumes anything other than exactly one byte invalidates
+  two arguments at once**: the length bounds `Node::rigid` and the suffix table
+  are computed from, and the reason byte offsets are char offsets on this engine.
+  Audit both, or the length early-out stops being a pure filter.
 - **New regex-template syntax: check it still yields a usable `fixed_len`, and
-  whether it pushes fancy-regex off the linear `regex` engine.** Stars are not
-  the hazard; backreferences are. If it reaches the backtracking VM, re-run
-  `limitcal` and expect the floors to move.
+  that it stays inside what `regex` accepts.** Anything needing a backreference
+  or look-around belongs on the structural engine — putting it back in front of
+  `regex` would be a compile error at best and a reinstated `fancy_regex`
+  dependency at worst.
 - **Any new gap-like symbol must join `collapse_gap_run`,** or it becomes a fresh
   way for a user to rebuild the pathological shape by accident.
 - **Order checks cheapest-and-most-selective first,** and keep anything that
@@ -215,6 +215,45 @@ The first bullet and the `fixed_len` one bite hardest, and the suite shows you
 both distinctly: a per-word branch on pattern syntax appears as a uniform
 slowdown across a whole tier, while a broken length early-out appears on exactly
 the patterns whose `fixed_len` is `Some` and nowhere else.
+
+## Two engines, and why the boundary is where it is
+
+`needs_structural` sends subpatterns, digit variables and `` `N `` fuzz to the
+structural walker; everything else goes to `regex`. That split is a measured
+result, not an accident of history, and the measurements are worth keeping
+because the obvious simplification — one engine — is wrong in one direction and
+right in the other.
+
+The A/B is exact and costs no code: wrapping a pattern in parens forces it onto
+the structural engine with identical semantics, because a group with no `;` is
+spliced rather than compiled into a block. So `(c.t)` is `c.t` on the other
+engine, and match counts must agree (they did, across ~25 patterns).
+
+| shape | `regex` | structural | |
+|---|---|---|---|
+| fixed-length, no star, no digit | 0.95-1.17 ms | 0.90-1.16 ms | wash |
+| star, no digit | 1.72-2.09 ms | 3.74-5.44 ms | **regex, 1.9-2.9x** |
+| digit, no star | 1.05-3.05 ms | 0.89-1.08 ms | **structural, 1.2-2.8x** |
+| star + digit | 25-1972 ms | 4.6-57 ms | **structural, 5.4-37x** |
+
+`fancy-regex` paid for itself only while it stayed on the linear `regex` crate
+(`RegexImpl::Wrap`), which is exactly the no-digit case. One digit dropped it onto
+the backtracking VM, and there a plain array store wins every time — so digit
+variables moved, `backtrack_limit` stopped bounding anything, and the dependency
+went with it. Stars without digits stay on `regex`, where the literal and DFA
+machinery is ahead by 1.9-2.9x and the walker has no answer; that is the half of
+the redundancy worth keeping.
+
+The fuzzy tokenizer was the other half, and it *was* redundant: `Tok` was
+`FuzzTok` plus `Var` and `Sub`, and `walk` was `fuzzy_match` plus an environment
+and a cut. Merging cost the cheap fuzzy patterns 8-10% and the starred ones ~16%,
+and paid that back on the expensive ones (`` **********cat`1 `` -18%,
+`` *.*.*.*.*.*.*.*.*.*cat`1 `` -23%) because the walker's length bounds prune
+what `fuzzy_match` had to explore. Worth knowing before optimizing: the per-node
+overhead the merge added is what `Node::rigid` exists to skip.
+
+Net across the whole corpus: **700 ms to 221 ms**, with `backref` going 403 to 53
+and `pathological` 183 to 59.
 
 ## Subpatterns: the structural engine
 
@@ -301,11 +340,24 @@ walking the tree in the same left-to-right order the matcher does. That keeps th
 per-word path free of an "unbound variable" case it would otherwise carry
 forever.
 
+### Fuzz, now that it lives here
+
+`` `N `` is a per-`Node` budget, armed by `match_node` and spent only by `Lit`
+positions — so it means what it always meant for a paren-free template, and
+composes with a subpattern the obvious way: the block is rigid, like `.` or
+`[abc]`, and the literals around it can vary. `ele(;nahpt)`1` matches *alephant*
+and *elephant* but not *elephxnt*. That combination used to be a hard error, and
+it is the one restriction the merge lifted rather than preserved.
+
+Two it did **not** lift, both preserved exactly:
+
+- **Fuzz and a digit variable in the same node.** It is not clear whether a
+  fuzzed position should still bind, and guessing is worse than erroring.
+- **Fuzz and an anagram pool in the same node**, which `compile_anagram` refused
+  before there were nodes.
+
 ### What it deliberately refuses
 
-- **Fuzz (`` `N ``) anywhere in a part containing a subpattern.** A per-node
-  mismatch budget composing with a split search and a variable environment is a
-  design question of its own; erroring is honest and can be lifted later.
 - **`&` and `!` inside `(...)`.** Both are whole-query operators, and the `&`
   split is textual — without the check in `reject_operators_in_subpattern`,
   `(a&b)` would be torn in half and surface as a baffling `"Unclosed '('"`.
@@ -314,7 +366,7 @@ forever.
 ## Every backtracking path needs a bound (`Limits`)
 
 Pattern input is untrusted — even from a local user, a plausible-looking pattern
-could hang or OOM the app. There are **four** superlinear paths in `pattern.rs`,
+could hang or OOM the app. There are **three** superlinear paths in `pattern.rs`,
 all bounded by [`Limits`](../cha-core/src/limits.rs), whose `Default` is generous
 enough that no hand-typed pattern reaches it. `compile_pattern`/
 `compile_pattern_checked` use the defaults; `compile_pattern_with`/
@@ -322,11 +374,11 @@ enough that no hand-typed pattern reaches it. `compile_pattern`/
 tighter ones.
 
 **One struct, split by phase — not by module.** `Limits` lives in its own module
-and carries all eight ceilings, including the two the *scan* consults
+and carries all six ceilings, including the two the *scan* consults
 (`max_results`, `deadline`). It was previously two nested structs, `CompileLimits`
 inside `SearchLimits`, which implied a compile/scan split that the fields do not
-actually follow: `backtrack_limit` and `max_fuzzy_steps` sat in `CompileLimits`
-but bind **per candidate word**. The distinction that matters to a caller is
+actually follow: the per-word ceilings sat in `CompileLimits` despite binding
+**per candidate word**. The distinction that matters to a caller is
 *when a limit binds*, and that cuts across both modules, so the doc comments —
 not the type — carry it. `compile_pattern_checked_with` ignores the two scan-time
 fields, which is cheaper than making every caller build a nested struct.
@@ -341,33 +393,16 @@ fields, which is cheaper than making every caller build a nested struct.
   where it is, before the product is built. Use `checked_mul`: the product
   overflows `usize` at around 28 five-way groups, and a wrapped value would slip
   under the cap.
-- **`backtrack_limit` — match-time, per word.** Bounds `fancy-regex` on the
-  non-fuzzy template path. It binds far more narrowly than it looks: a template
-  with **no digit variables** compiles to something `fancy-regex` hands straight
-  to the linear `regex` crate (`RegexImpl::Wrap`), which never backtracks. Stars
-  alone are therefore *not* the hazard — measured, `**********cat` and
-  `*a*e*i*o*` both run correctly with `backtrack_limit` set to **1**, at the same
-  ~22 ns/word as everything else on that path. Backreferences are what reach the
-  backtracking VM, and stars *combined* with them are what go exponential — but
-  only stars that survive collapsing (see below), i.e. alternating stars with
-  *distinct* backreferences: `*1*2*1*2*` needs ~1_315 steps, and
-  `*1*2*3*4*1*2*3*4*` is still budget-bound at the default (~3 s per scan, 566
-  matches at 20_000 vs 579 at 200_000). Cite that shape, not a star-only one,
-  when explaining why this limit exists.
-- **`max_fuzzy_steps` — match-time, per word.** Bounds `fuzzy_match`, the
-  hand-rolled backtracker on the fuzzy path. Note its `budget` parameter is the
-  *fuzz allowance*, a different quantity — don't overload it. Depth was never the
-  exposure either; the `Star` arm branches twice per node, and it is the node
-  count that was unbounded.
 - **`max_structural_steps` — match-time, per word.** Bounds `walk`/`match_node`
   on the subpattern path, where two sources of branching are layered: the `Star`
   arm recurses twice per node, and the `Sub` arm tries every cut offset its
   length bounds allow. Those bounds are what keep it cheap — a composition whose
   elements all have a fixed length never branches at all, so this binds only on
-  shapes like `*(12)*(;12)*(;12)*`. The variable environment is passed **by
-  value** (ten bytes), so abandoning a branch costs nothing and there is no
-  binding trail to unwind; depth is bounded by tokens + word length, as on the
-  fuzzy path. It is the node count, and only the node count, that needed a cap.
+  shapes like `*(12)*(;12)*(;12)*` and `` *a*b*c*d*`2 ``. Depth is bounded by
+  tokens + word length, and the two things a failed branch has to undo (a
+  variable binding, an appended `MatchInfo` fragment) are each restored in place
+  by the one arm that writes them. It is the node count, and only the node count,
+  that needed a cap.
 - **`max_subpattern_depth` — compile-time.** Caps `(...)` nesting, and so the
   depth of `compile_node`'s recursion. Checked once by `check_nesting_depth`
   before anything recurses, which is why the recursive compile helpers can skip
@@ -380,30 +415,24 @@ fields, which is cheaper than making every caller build a nested struct.
   measured against the cheapest possible scan (~12 ns/word) a never-firing
   deadline is indistinguishable from `None`. Do **not** move it per-word.
 
-**Enforcing the match-time limits costs nothing measurable.** `backtrack_limit`
-only picks the threshold `fancy-regex` compares against — it increments its
-counter either way. `max_fuzzy_steps` was A/B'd against a build with the counter
-deleted outright (the timing harness now in
-[`perf`](../cha-core/examples/perf.rs)); the counted
-build came out a wash or slightly *faster* across every pattern and every round,
-the difference being codegen noise. Don't "optimize" either one away.
+**Enforcing the match-time limit costs nothing measurable.**
+`max_structural_steps` was A/B'd against a build with the counter deleted
+outright (the timing harness now in [`perf`](../cha-core/examples/perf.rs)); the
+counted build came out a wash or slightly *faster* across every pattern and every
+round, the difference being codegen noise. Don't "optimize" it away.
 
-**The match-time defaults are calibrated, not guessed.**
+**The match-time default is calibrated, not guessed.**
 [`limitcal`](../cha-core/examples/limitcal.rs) binary-searches, per pattern, the
-smallest limit that still returns every match an unlimited one finds (both limits
-are monotone, so this is well-defined). Realistic patterns need very little — the
-worst are `*1*1` at 193 steps and `` *a*e*`1 `` at 396 — and a deliberately
-adversarial tier tops out at 1_315 and 3_698. `max_structural_steps` is
-calibrated the same way and on the same scale: realistic subpattern shapes top
-out at 51 steps (`*(;ing)*`) and the adversarial tier at 329
-(`*(12)*(;12)*(;12)*`), against a default of 5_000. The defaults are ~15x that
-adversarial worst case. They were **1_000_000 apiece**, which bounded nothing
-useful: `` **********cat`1 `` took **66 s** for one scan under that ceiling while
-finding all of its real matches within 57 steps. Cost is linear in the limit, so
-lowering it was nearly free in correctness and worth ~8x in time. Re-run
-`limitcal` before changing either number — note the floors are set by
-`*1*2*1*2*` and `` *a*b*c*d*`2 ``, whose digits break the gap runs for real, so
-the normalization below did not move them.
+smallest limit that still returns every match an unlimited one finds (the limit
+is monotone, so this is well-defined). Realistic patterns need very little — the
+worst are `` *a*e*`1 `` at 386 steps and `*(;ing)*` at 51 — and the adversarial
+tier tops out at 3_053 (`` *a*b*c*d*`2 ``). The 50_000 default is ~16x that, and
+also clears 17_821, which is what `*1*2*3*4*1*2*3*4*` needs; covering *that* one
+is a correctness claim rather than headroom, because the old regex path returned
+566 of its 579 matches and could not be made to return the rest at any practical
+ceiling. Patterns on the regex path are still in the corpus and are expected to
+report a floor of 1 — a floor above 1 for one of them means something has been
+rerouted by accident. Re-run `limitcal` before changing the number.
 
 **Runs of `.` and `*` are normalized, and that is the real fix for star-heavy
 patterns.** A maximal run of gap symbols with k dots and at least one star

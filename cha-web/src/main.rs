@@ -67,15 +67,12 @@ fn web_limits() -> Limits {
         max_pattern_len: MAX_PATTERN_LEN,
         max_anagram_combos: 4_096,
         max_subpattern_depth: 4,
-        // These three are *match-time* limits, re-armed per candidate word.
-        // They sit ~3-8x above the worst adversarial pattern
-        // `cha-core/examples/limitcal.rs` measures (1_315 backtrack steps,
-        // 3_698 fuzzy steps) — less headroom than the interactive defaults
-        // take, deliberately: the deadline below is the real backstop here, and
-        // a lost match on a hostile pattern matters less than a worker held
+        // Both of these are *match-time* limits, re-armed per candidate word.
+        // They sit nearer the worst adversarial pattern
+        // `cha-core/examples/limitcal.rs` measures than the interactive defaults
+        // do, deliberately: the deadline below is the real backstop here, and a
+        // lost match on a hostile pattern matters less than a worker held
         // hostage.
-        backtrack_limit: 10_000,
-        max_fuzzy_steps: 10_000,
         max_structural_steps: 10_000,
         max_results: WEB_MAX_RESULTS,
         deadline: None, // set per request; see `search`
@@ -172,8 +169,8 @@ fn run_bench(lists: &[NamedWordList], pattern: &str, iterations: u32) -> ! {
     );
     println!("  pattern       {pattern}");
     println!(
-        "  limits        max_results={} backtrack={} fuzzy={} (no deadline while timing)",
-        limits.max_results, limits.backtrack_limit, limits.max_fuzzy_steps
+        "  limits        max_results={} structural={} (no deadline while timing)",
+        limits.max_results, limits.max_structural_steps
     );
 
     // One unmeasured pass: the first scan faults in the whole word list and

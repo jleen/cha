@@ -23,14 +23,20 @@
 //! it silently narrows the pattern language. The defaults below are calibrated
 //! against that risk — see [`Limits::interactive`].
 //!
-//! No match-time limit costs anything measurable to *enforce*.
-//! `backtrack_limit` only picks the threshold `fancy-regex` compares against; it
-//! increments its counter unconditionally either way. And `max_fuzzy_steps` was
-//! measured against a build with the counter removed outright — with the timing
-//! harness now in `examples/perf.rs` — which came out a wash or slightly slower,
-//! the difference being codegen noise rather than the decrement.
-//! `max_structural_steps` is the same kind of counter on the same kind of
-//! recursion.
+//! The one match-time work limit costs nothing measurable to *enforce*:
+//! `max_structural_steps` is a decrement on a recursion that was measured — with
+//! the timing harness now in `examples/perf.rs` — against a build with the
+//! counter removed outright, which came out a wash or slightly slower, the
+//! difference being codegen noise rather than the decrement.
+//!
+//! There used to be a second one, `backtrack_limit`, bounding `fancy-regex` on
+//! the template path. Digit variables were the only construct that put a
+//! backreference in front of that engine, and they compile to `Tok::Var` on the
+//! structural engine now — measured 1.2x to 89x faster, and without the silent
+//! truncation the ceiling caused. What is left of the template language is a
+//! pure DFA, matched by `regex` in linear time, so the limit bounded nothing:
+//! `limitcal` reported a floor of 1 for it across the whole corpus before it was
+//! removed.
 
 use std::time::Instant;
 
@@ -68,48 +74,20 @@ pub struct Limits {
     pub max_subpattern_depth: usize,
 
     // ---- Match-time: re-armed per candidate word. ----
-    /// Maximum regex backtracking steps **per word** (`fancy-regex`'s own unit).
-    ///
-    /// Match-time. Applies to the non-fuzzy template path. Note this binds far
-    /// more narrowly than it looks: `template_to_regex` maps `*` to `[a-z]*`,
-    /// but a template with no digit variables compiles to a pattern
-    /// `fancy-regex` hands straight to the linear `regex` crate
-    /// (`RegexImpl::Wrap`), which never backtracks at all. Star-only patterns
-    /// are therefore unaffected by this limit — measured, `**********cat` and
-    /// `*a*e*i*o*` both run correctly with `backtrack_limit` set to **1**.
-    ///
-    /// Backreferences are what actually reach the backtracking VM, and stars
-    /// combined with them are what make it exponential. Runs of `.`/`*` no
-    /// longer contribute — `compile_template` normalizes them, see
-    /// `collapse_gap_run` — so what is left is alternating stars separated by
-    /// *distinct backreferences*, which genuinely break the run:
-    /// `*1*2*1*2*` needs ~1_315 steps, and `*1*2*3*4*1*2*3*4*` is still
-    /// budget-bound at the default (566 matches at 20_000, 579 at 200_000, ~3 s
-    /// per scan either way). That shape, not a star-only one, is the case this
-    /// limit exists for.
-    pub backtrack_limit: usize,
-
-    /// Maximum `fuzzy_match` nodes explored **per word**.
-    ///
-    /// Match-time. Applies to the fuzzy path, whose `Star` arm recurses twice
-    /// per node with no engine underneath it to impose a limit of its own. This
-    /// is a different quantity from `fuzzy_match`'s `budget` parameter (the
-    /// fuzz allowance) and from its recursion depth, which is naturally bounded
-    /// — it is the node count, and only the node count, that was unbounded.
-    pub max_fuzzy_steps: u32,
-
     /// Maximum structural-matcher nodes explored **per word**.
     ///
-    /// Match-time. Applies to the subpattern path, whose `Star` arm recurses
+    /// Match-time. Applies to the structural path — subpatterns, digit
+    /// variables and `` `N `` fuzz all share it — whose `Star` arm recurses
     /// twice per node and whose `Sub` arm tries every split offset its length
-    /// bounds allow — two sources of branching layered on each other, with no
-    /// engine underneath to impose a limit of its own. A pattern whose elements
-    /// all have a fixed length never branches at all (the split is forced), so
-    /// this binds only on shapes like `*(;ab)*(;cd)*`.
+    /// bounds allow, with no engine underneath to impose a limit of its own. A
+    /// pattern whose elements all have a fixed length never branches at all (the
+    /// split is forced), so this binds only on shapes like `` *a*b*c*d*`2 `` and
+    /// `*(;ab)*(;cd)*`.
     ///
-    /// Like `max_fuzzy_steps`, this is the node count and nothing else: the
-    /// recursion depth is naturally bounded by tokens + word length, and the
-    /// variable environment is passed by value rather than unwound.
+    /// This is the node count and nothing else: the recursion depth is naturally
+    /// bounded by tokens + word length, the variable environment is passed by
+    /// value rather than unwound, and the `` `N `` mismatch allowance is a
+    /// different quantity again — don't overload them.
     pub max_structural_steps: u32,
 
     /// Maximum rows materialized across *all* groups combined.
@@ -167,12 +145,11 @@ impl Limits {
             max_anagram_combos: 100_000,
             // Nesting past this is a typo, not a query.
             max_subpattern_depth: 8,
-            // ~15x the worst adversarial backreference pattern measured (1_315).
-            backtrack_limit: 20_000,
-            // ~15x the worst adversarial fuzzy pattern measured (3_698).
-            max_fuzzy_steps: 50_000,
-            // ~15x the worst adversarial subpattern shape measured (329).
-            max_structural_steps: 5_000,
+            // ~15x the worst adversarial shape in limitcal's corpus
+            // (`` *a*b*c*d*`2 ``, 3_053). Generous enough to also cover
+            // `*1*2*3*4*1*2*3*4*` at 17_821, which the regex path could not
+            // return in full at any practical ceiling.
+            max_structural_steps: 50_000,
             // The cap protects the DOM from a pattern like `*` matching the
             // whole list.
             max_results: 5_000,

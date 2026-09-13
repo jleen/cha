@@ -48,9 +48,10 @@
       <p>
         The <code>`N</code> syntax specifies that <code>N</code> many literals can
         be “wrong”, i.e. different from the given. Thus <code>foo`1</code> will
-        match <code>foe</code> and <code>goo</code>. This has no effect on
-        wildcards, but cannot be combined with anagrams or the <code>*</code>
-        wildcard.
+        match <code>foe</code> and <code>goo</code>. Only literal letters can
+        vary: wildcards, character classes and subpatterns are rigid, and spend no
+        budget. It cannot be combined with an anagram pool or with a digit
+        variable.
       </p>
       <pre><code>cat`1       # CAT, BAT, CAR, COT, … (one letter off)
 electron`2  # up to two letters off
@@ -96,7 +97,9 @@ t....;intra       # starts with T, is an anagram of INTRA
         Parentheses with no <code>;</code> inside constrain nothing, so
         <code>ele(ph)ant</code> is just <code>elephant</code>. <code>&amp;</code>
         and <code>!</code> are whole-query operators and cannot appear inside a
-        subpattern. <code>`N</code> cannot be combined with one.
+        subpattern. <code>`N</code> can: the block stays rigid and the literals
+        around it vary, so <code>ele(;nahpt)`1</code> matches ELEPHANT and
+        ALEPHANT.
       </p>
       <p>
         A digit variable is one variable across the whole pattern, so it can be
