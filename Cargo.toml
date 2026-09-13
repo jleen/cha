@@ -36,3 +36,4 @@ cha-core = { path = "cha-core" }
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
 terminal_size = "0"
+unicode-width = "0.2.2"

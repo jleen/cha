@@ -71,7 +71,7 @@ ai-generated: true
   top of the embedded list — additive, not a replacement. Hidden files
   (`.DS_Store`) are skipped so their binary contents don't inject junk words;
   files load in sorted-name order; unreadable files are warned-and-skipped.
-  `cha_core::dictionary::WordListBuilder` does the cross-source trim/lowercase/
+  `cha_core::dictionary::WordListBuilder` does the cross-source trim/fold/
   dedup. Files are read once at launch, so newly added lists need a reopen (the
   notice says so).
 - **Word lists keep their provenance — matches are grouped and labeled by

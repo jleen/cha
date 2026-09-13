@@ -1,4 +1,7 @@
 use regex::RegexBuilder;
+use std::cell::OnceCell;
+
+use crate::fold::fold;
 use std::borrow::Cow;
 
 use crate::limits::Limits;
@@ -138,6 +141,13 @@ pub fn compile_pattern_checked_with(
             limits.max_pattern_len
         )));
     }
+    // Canonicalize the pattern exactly as the dictionary was canonicalized, so
+    // both sides of every comparison are in the same alphabet: `ÉLAN` and `élan`
+    // and `elan` all compile to the same matcher, and all three find `Élan`. Only
+    // letters are touched — every metacharacter is ASCII punctuation or a digit,
+    // which folding leaves alone — so this cannot disturb the syntax.
+    let folded = fold(pattern_str);
+    let pattern_str: &str = &folded;
     // `&` and `!` are whole-query operators, and the split below is textual, so
     // neither can be allowed inside a subpattern: `(a&b)` would otherwise be
     // torn into two parts and surface as a baffling "Unclosed '('". Rejecting
@@ -341,6 +351,29 @@ fn split_fuzz(template: &str) -> Result<(&str, Option<usize>), PatternError> {
     }
 }
 
+/// Match `word` against the lazily-built wide-class regex. See
+/// `compile_template` for why it is built on demand.
+fn unicode_match(
+    cell: &OnceCell<Option<regex::Regex>>,
+    template: &str,
+    word: &str,
+) -> Option<MatchInfo> {
+    // Same syntax, wider class: if the ASCII one built, this one does too, so
+    // `None` is unreachable and degrades to "no match" rather than making the
+    // hot path fallible.
+    cell.get_or_init(|| build_template_regex(template, ANY_LETTER_UNICODE).ok())
+        .as_ref()
+        .filter(|re| re.is_match(word))
+        .map(|_| MatchInfo::default())
+}
+
+fn build_template_regex(template: &str, class: &str) -> Result<regex::Regex, PatternError> {
+    let (regex_str, _) = template_to_regex(template, class)?;
+    RegexBuilder::new(&format!("(?i)^{}$", regex_str))
+        .build()
+        .map_err(|e| PatternError(format!("Invalid template '{}': {}", template, e)))
+}
+
 fn compile_template(template: &str) -> Result<Matcher, PatternError> {
     // Every `` `N `` template routes to the structural engine (see
     // `needs_structural`), so a fuzz suffix cannot reach here.
@@ -348,37 +381,76 @@ fn compile_template(template: &str) -> Result<Matcher, PatternError> {
         !template.contains('`'),
         "a fuzz suffix should have routed to the structural engine"
     );
-    let (regex_str, fixed_len) = template_to_regex(template)?;
+    // Two regexes, differing only in what `.` and `*` admit, and chosen per word
+    // rather than per pattern — because the choice depends on the *word*, not on
+    // the syntax.
+    //
+    // **The Unicode one is built lazily, and that is not a micro-optimization.**
+    // `search` compiles the pattern on every call, so compilation is on the hot
+    // path in a way match time usually hides: `\p{Alphabetic}` expands to a UTF-8
+    // automaton of hundreds of states, and a template repeating it nine times
+    // (`.........`) costs ~2 ms to *build*. Measured, that alone tripled the
+    // whole scan — 1.20 ms to 3.19 ms — while the matcher itself was unchanged at
+    // 1.14 ms. A word list with no non-ASCII entry never triggers it, so the
+    // shipped list never pays, and a list that does pays once per query.
+    //
     // Nothing reaching here can backtrack. Digit variables were the only source
     // of backreferences, and they compile to `Tok::Var` on the structural engine
     // now, so what is left is a pure DFA language and `regex` matches it in
     // linear time with no ceiling to trip. That is why this path cannot silently
     // truncate a result set, and why it no longer needs a `Limits` field: the
     // engine's own guarantee replaces the one we used to have to impose.
-    let re = RegexBuilder::new(&format!("(?i)^{}$", regex_str))
-        .build()
-        .map_err(|e| PatternError(format!("Invalid template '{}': {}", template, e)))?;
+    let (_, fixed_len) = template_to_regex(template, ANY_LETTER_ASCII)?;
+    let ascii_re = build_template_regex(template, ANY_LETTER_ASCII)?;
+    let owned = template.to_string();
+    let unicode_re: OnceCell<Option<regex::Regex>> = OnceCell::new();
+
     Ok(Box::new(move |word: &str| {
         // Reject on length before invoking the regex engine. A star-free template
         // matches exactly one length, and on a large list the overwhelming
-        // majority of words are the wrong length — so this replaces a
-        // backtracking match with an integer compare for most of the scan. It is
-        // a pure filter: any word this rejects could not have matched anyway.
+        // majority of words are the wrong length — so this replaces a regex match
+        // with an integer compare for most of the scan. It is a pure filter: any
+        // word this rejects could not have matched anyway.
+        //
+        // Order matters more than it looks. Byte length is a lower bound on
+        // character count (a UTF-8 char is at least one byte), so `< n` rejects
+        // outright; `== n` is the overwhelmingly common survivor and needs no
+        // further test; and only `> n` has to ask whether the word is ASCII,
+        // because only a multi-byte word can be `n` characters in more than `n`
+        // bytes. Asking unconditionally — scanning every word that clears the
+        // lower bound — cost 60-90% on this tier.
         if let Some(n) = fixed_len {
-            // Byte length is a safe lower bound on character count, since a UTF-8
-            // char is at least one byte — so a word shorter than `n` bytes can
-            // never match. The exact test is only valid when the word is
-            // all-ASCII, where bytes and chars coincide; anything else falls
-            // through and lets the regex decide.
-            if word.len() < n || (word.len() != n && word.is_ascii()) {
+            if word.len() < n {
                 return None;
             }
+            if word.len() != n {
+                // More bytes than characters means a multi-byte word, which only
+                // the precise class can judge.
+                if word.is_ascii() {
+                    return None;
+                }
+                return unicode_match(&unicode_re, &owned, word);
+            }
         }
-        if re.is_match(word) {
-            Some(MatchInfo::default())
-        } else {
-            None
+        // On ASCII input the two classes are the same language — `(?i)[a-z]` is
+        // ASCII Alphabetic — so a match here is a match either way, and the
+        // `is_ascii` scan below is skipped for every word that matches.
+        //
+        // A superset class cheap enough to reject without asking `is_ascii` at
+        // all was tried here and is not available: `[a-z\x{80}-\x{10FFFF}]` made
+        // `*` 2.2x and `*a*` 3.5x slower, because spanning every non-ASCII
+        // scalar costs the engine more than the scan it saves.
+        if ascii_re.is_match(word) {
+            return Some(MatchInfo::default());
         }
+        // A folded word is ASCII unless it carries a letter from a script the
+        // fold leaves alone — under 1% of a large real list, and none of the
+        // shipped one. Those are the only words the wider class can rescue, and
+        // asking costs a byte scan on words that failed above.
+        if word.is_ascii() {
+            return None;
+        }
+        unicode_match(&unicode_re, &owned, word)
     }))
 }
 
@@ -441,6 +513,24 @@ fn escape_in_char_class(c: char) -> String {
     }
 }
 
+/// What `.` and `*` match for a word the fold left non-ASCII: one letter, in
+/// any script.
+///
+/// `@` and `#` deliberately do *not* follow. "Is omega a vowel" has no
+/// locale-free answer, so they keep their ASCII sets and a Greek word never
+/// matches `#@#`.
+const ANY_LETTER_UNICODE: &str = r"\p{Alphabetic}";
+
+/// What `.` and `*` match for an ASCII word.
+///
+/// Identical in meaning to [`ANY_LETTER_UNICODE`] restricted to ASCII — `(?i)`
+/// makes `[a-z]` cover `A-Z` — and far cheaper. The wide class expands to a
+/// UTF-8 automaton of hundreds of states, and `search` rebuilds the regex on
+/// every call, so a template repeating it nine times cost ~2 ms per query to
+/// *compile*. That, not match time, was the whole of the first measured
+/// regression here.
+const ANY_LETTER_ASCII: &str = "[a-z]";
+
 /// Translate a template to a regex, and report the exact length it can match.
 ///
 /// Every construct except `*` consumes exactly one character, so a star-free
@@ -449,7 +539,10 @@ fn escape_in_char_class(c: char) -> String {
 /// `None` means the length is not fixed (the template contains a `*`, or a
 /// literal whose lowercasing changes its character count, which would make the
 /// count unreliable).
-fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternError> {
+fn template_to_regex(
+    template: &str,
+    any_letter: &str,
+) -> Result<(String, Option<usize>), PatternError> {
     let mut out = String::new();
     let mut fixed_len: Option<usize> = Some(0);
     let chars: Vec<char> = template.chars().collect();
@@ -468,7 +561,7 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
     while i < chars.len() {
         match chars[i] {
             '.' => {
-                out.push_str("[a-z]");
+                out.push_str(any_letter);
                 consume_one!();
             }
             '*' => {
@@ -477,9 +570,10 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
                 // has already made the length unknowable.
                 let dots = collapse_gap_run(&chars, &mut i);
                 for _ in 0..dots {
-                    out.push_str("[a-z]");
+                    out.push_str(any_letter);
                 }
-                out.push_str("[a-z]*");
+                out.push_str(any_letter);
+                out.push('*');
                 fixed_len = None; // the only variable-width construct
             }
             '@' => {
@@ -549,37 +643,185 @@ fn template_to_regex(template: &str) -> Result<(String, Option<usize>), PatternE
     Ok((out, fixed_len))
 }
 
-fn count_chars(chars: &[char]) -> [usize; 26] {
-    let mut counts = [0usize; 26];
-    for &c in chars {
-        if c.is_ascii_lowercase() {
-            counts[(c as u8 - b'a') as usize] += 1;
-        }
-    }
-    counts
+/// How many distinct non-ASCII letters one pattern may name.
+///
+/// Not a [`Limits`] field: it sizes the stack array in [`Histogram`], so it has
+/// to be a compile-time constant. Sixteen is far past any real pattern — the
+/// whole 6M-entry `wikipedia.dict` contains six distinct non-ASCII letters after
+/// folding — and exceeding it is a normal `PatternError`, not a silent truncation.
+const MAX_EXTRA_LETTERS: usize = 16;
+
+/// A letter histogram: `a`-`z`, plus a slot for each non-ASCII letter the
+/// *pattern* names.
+///
+/// The 26-bucket array survives intact, which is the point. Words are folded
+/// before they get here, so all but a fraction of a percent of them are pure
+/// ASCII and never touch `extra` at all — the alternative, a map keyed by
+/// `char`, was measured at ~6x slower back when this was ASCII-only and there is
+/// no reason to think it got faster.
+///
+/// `extra[j]` counts `alphabet[j]`, where the alphabet belongs to the [`Pool`].
+/// A letter in neither place is *foreign*: countable but never matchable, so it
+/// needs no slot. See [`Tally`].
+///
+/// Counts are `u32`, not `usize`, and that is a measured choice rather than
+/// tidiness: this is zeroed once per candidate word, so its size *is* per-word
+/// work. At `usize` the two arrays came to 336 bytes against the 208 of the
+/// `[usize; 26]` this replaced, and the anagram tier paid 13% for it. At `u32`
+/// they come to 168 — less than the original — and a count cannot overflow
+/// anyway, being bounded by the length of one word.
+#[derive(Clone, Copy)]
+struct Histogram {
+    ascii: [u32; 26],
+    extra: [u32; MAX_EXTRA_LETTERS],
 }
 
-/// Count the ASCII letters of `s` into a 26-bucket histogram, returning the
-/// histogram, the total letter count, and `has_other`: whether `s` contains any
-/// character that is not an ASCII letter (a digit, symbol, or non-ASCII letter —
-/// its UTF-8 bytes are all non-`is_ascii_alphabetic`). Callers matching pure
-/// anagrams use `has_other` to reject candidates that carry non-letter cruft, so
-/// the anagram alphabet matches the template path's ASCII `[a-z]`. Punctuation
-/// (`space -'`) has already been stripped from candidates upstream, so it never
-/// registers as "other" here.
-fn count_str(s: &str) -> ([usize; 26], usize, bool) {
-    let mut counts = [0usize; 26];
-    let mut len = 0;
-    let mut has_other = false;
-    for b in s.bytes() {
-        if b.is_ascii_alphabetic() {
-            counts[(b.to_ascii_lowercase() - b'a') as usize] += 1;
-            len += 1;
-        } else {
-            has_other = true;
+impl Histogram {
+    const ZERO: Histogram = Histogram {
+        ascii: [0; 26],
+        extra: [0; MAX_EXTRA_LETTERS],
+    };
+
+    // Every method below takes `n_extra`, the number of `extra` slots the pattern
+    // actually uses, and stops there rather than running the array's full
+    // capacity. For an ASCII pattern that is zero, so these are precisely the
+    // 26-iteration loops they were before non-ASCII letters existed — looping the
+    // capacity instead cost 15% on the hybrid tier, which is one of the three
+    // shapes people actually type.
+
+    /// Per-letter maximum, which is how a hybrid pool absorbs template letters.
+    fn max_with(&self, other: &Histogram, n_extra: usize) -> Histogram {
+        let mut out = *self;
+        for i in 0..26 {
+            out.ascii[i] = out.ascii[i].max(other.ascii[i]);
+        }
+        for j in 0..n_extra {
+            out.extra[j] = out.extra[j].max(other.extra[j]);
+        }
+        out
+    }
+
+    /// Total of `self - other`, per letter, floored at zero.
+    fn surplus_over(&self, other: &Histogram, n_extra: usize) -> usize {
+        let ascii: u32 = (0..26)
+            .map(|i| self.ascii[i].saturating_sub(other.ascii[i]))
+            .sum();
+        let extra: u32 = (0..n_extra)
+            .map(|j| self.extra[j].saturating_sub(other.extra[j]))
+            .sum();
+        (ascii + extra) as usize
+    }
+
+    /// Both directions of [`Histogram::surplus_over`] in one pass, as
+    /// `(self - other, other - self)`.
+    ///
+    /// Fused because the hybrid arm needs both and the original code computed
+    /// them in a single loop; splitting them doubled the per-word arithmetic on
+    /// the path every dotted-plus-anagram query takes.
+    fn diff_both(&self, other: &Histogram, n_extra: usize) -> (usize, usize) {
+        let (mut mine, mut theirs) = (0u32, 0u32);
+        for i in 0..26 {
+            mine += self.ascii[i].saturating_sub(other.ascii[i]);
+            theirs += other.ascii[i].saturating_sub(self.ascii[i]);
+        }
+        for j in 0..n_extra {
+            mine += self.extra[j].saturating_sub(other.extra[j]);
+            theirs += other.extra[j].saturating_sub(self.extra[j]);
+        }
+        (mine as usize, theirs as usize)
+    }
+
+    /// Whether `other` covers every letter `self` asks for.
+    fn covered_by(&self, other: &Histogram, n_extra: usize) -> bool {
+        (0..26).all(|i| self.ascii[i] == 0 || other.ascii[i] >= self.ascii[i])
+            && (0..n_extra).all(|j| self.extra[j] == 0 || other.extra[j] >= self.extra[j])
+    }
+}
+
+/// What one candidate word contains, measured against a pattern's alphabet.
+struct Tally {
+    hist: Histogram,
+    /// Letters the pattern never names, so always surplus and never matchable.
+    /// Counting them without identifying them is what keeps the hot path free of
+    /// a map: which letter it was only matters on the confirmed-match path, where
+    /// `diff_letters` can afford to spell it out.
+    foreign: usize,
+    /// Total letters, `foreign` included.
+    len: usize,
+    /// Whether the word carries anything that is not a letter — a digit, a
+    /// symbol, `×`, `²`. Non-ASCII or not makes no difference, which is the rule
+    /// that non-ASCII non-letters are treated exactly like ASCII ones.
+    has_other: bool,
+}
+
+/// Index of `c` in `a`-`z`, if it is there.
+#[inline]
+fn ascii_slot(c: char) -> Option<usize> {
+    c.is_ascii_lowercase().then(|| (c as u8 - b'a') as usize)
+}
+
+/// Count `chars` into a histogram over `alphabet`. Compile-time only.
+fn count_chars(chars: &[char], alphabet: &[char]) -> Histogram {
+    let mut h = Histogram::ZERO;
+    for &c in chars {
+        if let Some(i) = ascii_slot(c) {
+            h.ascii[i] += 1;
+        } else if let Some(j) = alphabet.iter().position(|&a| a == c) {
+            h.extra[j] += 1;
         }
     }
-    (counts, len, has_other)
+    h
+}
+
+/// Tally the letters of `s` against `alphabet`.
+///
+/// The byte loop is the original ASCII one, in the original order: an ASCII
+/// letter costs exactly one test, as it always did, and only a non-letter byte
+/// pays a second to ask whether it is ASCII at all. Getting that order wrong —
+/// testing for non-ASCII first — cost 22-46% on the hybrid anagram tier, which
+/// is what a per-byte branch looks like when it lands in front of the common
+/// case. Decoding starts only once a non-ASCII byte actually turns up, so a
+/// folded ASCII word — the shipped list entirely, and 99.2% of a large
+/// supplementary one — never decodes anything.
+fn tally(s: &str, alphabet: &[char]) -> Tally {
+    let mut t = Tally {
+        hist: Histogram::ZERO,
+        foreign: 0,
+        len: 0,
+        has_other: false,
+    };
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        if b.is_ascii_alphabetic() {
+            t.hist.ascii[(b.to_ascii_lowercase() - b'a') as usize] += 1;
+            t.len += 1;
+        } else if b.is_ascii() {
+            t.has_other = true;
+        } else {
+            // `i` is on a char boundary: every byte before it was ASCII.
+            tally_chars(&s[i..], alphabet, &mut t);
+            break;
+        }
+    }
+    t
+}
+
+/// The general path, over characters rather than bytes. Reached only by a word
+/// the fold left holding a letter outside ASCII.
+fn tally_chars(rest: &str, alphabet: &[char], t: &mut Tally) {
+    for c in rest.chars() {
+        if let Some(k) = ascii_slot(c.to_ascii_lowercase()) {
+            t.hist.ascii[k] += 1;
+            t.len += 1;
+        } else if c.is_alphabetic() {
+            match alphabet.iter().position(|&a| a == c) {
+                Some(j) => t.hist.extra[j] += 1,
+                None => t.foreign += 1,
+            }
+            t.len += 1;
+        } else {
+            t.has_other = true;
+        }
+    }
 }
 
 fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
@@ -621,7 +863,7 @@ struct Pool {
     /// One entry per `[...]` combination: the pre-summed counter and its letter
     /// count. Built once at compile time; the per-word path never touches a
     /// `Vec` or a `HashMap` for pool accounting.
-    combo_pools: Vec<([usize; 26], usize)>,
+    combo_pools: Vec<(Histogram, usize)>,
     /// `.` wildcards: each licenses exactly one letter outside the pool.
     num_wildcards: usize,
     /// `*`: disables the length and surplus equalities entirely.
@@ -634,7 +876,10 @@ struct Pool {
     vars: Vec<u8>,
     /// Letters the enclosing template accounts for; see
     /// [`template_literal_letters`]. All zero for a pure anagram.
-    template_counter: [usize; 26],
+    template_counter: Histogram,
+    /// The non-ASCII letters this pattern names, giving meaning to a
+    /// [`Histogram`]'s `extra` slots. Empty for every ASCII pattern.
+    alphabet: Vec<char>,
     /// True when there is no template at all (a bare `;pool`).
     is_pure: bool,
 }
@@ -668,29 +913,27 @@ impl Pool {
     /// side.
     fn check_combo(
         &self,
-        pool_counter: &[usize; 26],
+        pool_counter: &Histogram,
         pool_base: usize,
-        candidate_counter: &[usize; 26],
-        candidate_len: usize,
+        candidate: &Tally,
     ) -> Option<MatchInfo> {
         let pool_size = pool_base + self.num_wildcards;
 
-        if self.is_pure && !self.has_star && candidate_len != pool_size {
+        if self.is_pure && !self.has_star && candidate.len != pool_size {
             return None;
         }
 
         // The "effective pool" is the set of letters the word is measured against
         // when reporting unused (pool − word) and extra (word − pool) letters.
-        let effective_pool: [usize; 26] = if self.is_pure {
-            for i in 0..26 {
-                if pool_counter[i] > 0 && candidate_counter[i] < pool_counter[i] {
-                    return None;
-                }
+        let n_extra = self.alphabet.len();
+        let effective_pool: Histogram = if self.is_pure {
+            if !pool_counter.covered_by(&candidate.hist, n_extra) {
+                return None;
             }
 
-            let extras: usize = (0..26)
-                .map(|i| candidate_counter[i].saturating_sub(pool_counter[i]))
-                .sum();
+            // A foreign letter is one the pool never names, so it is surplus by
+            // definition and counts toward the wildcard allowance like any other.
+            let extras = candidate.hist.surplus_over(pool_counter, n_extra) + candidate.foreign;
 
             if !self.has_star && extras != self.num_wildcards {
                 return None;
@@ -703,21 +946,12 @@ impl Pool {
             // Note that a star wildcard in the anagram pool means nothing in this case.
             // (The only thing it *could* mean is "ignore the anagram and do what you like",
             // which isn't very interesting.)
-            let mut anagram_counter = self.template_counter;
-            for i in 0..26 {
-                if pool_counter[i] > anagram_counter[i] {
-                    anagram_counter[i] = pool_counter[i];
-                }
-            }
+            let anagram_counter = self.template_counter.max_with(pool_counter, n_extra);
 
             // Count letters in the candidate that aren't in the anagram pool, and
-            // pool letters not used by the candidate.
-            let mut extra_count: usize = 0;
-            let mut unused_count: usize = 0;
-            for i in 0..26 {
-                extra_count += candidate_counter[i].saturating_sub(anagram_counter[i]);
-                unused_count += anagram_counter[i].saturating_sub(candidate_counter[i]);
-            }
+            // pool letters not used by the candidate — one pass for both.
+            let (surplus, unused_count) = candidate.hist.diff_both(&anagram_counter, n_extra);
+            let extra_count = surplus + candidate.foreign;
 
             // The candidate has to use all the pool letters (a longer word)
             // or it has to use *only* pool letters (a shorter word).
@@ -725,7 +959,7 @@ impl Pool {
             // Wildcards consume pattern symbols without actually adding license,
             // until all wildcards are consumed, at which point they license non-pool letters.
             if extra_count > self.num_wildcards
-                && unused_count > self.num_wildcards.saturating_sub(candidate_len)
+                && unused_count > self.num_wildcards.saturating_sub(candidate.len)
             {
                 return None;
             }
@@ -736,20 +970,26 @@ impl Pool {
         // Match confirmed. Now (and only now) do the extra work of spelling out the
         // unused (pool − word) and extra (word − pool) letters for display.
         Some(MatchInfo {
-            unused: diff_letters(&effective_pool, candidate_counter),
-            extra: diff_letters(candidate_counter, &effective_pool),
+            unused: diff_letters(&effective_pool, &candidate.hist, &self.alphabet, 0),
+            extra: diff_letters(
+                &candidate.hist,
+                &effective_pool,
+                &self.alphabet,
+                candidate.foreign,
+            ),
         })
     }
 
     /// Test a candidate against every `[...]` combination, under `env`.
-    fn check(&self, candidate: &str, env: &Env) -> Option<MatchInfo> {
-        let (candidate_counter, candidate_len, has_other) = count_str(candidate);
+    fn check(&self, candidate_str: &str, env: &Env) -> Option<MatchInfo> {
+        let candidate = &tally(candidate_str, &self.alphabet);
 
-        // A pure anagram rearranges letters, so a candidate carrying any non-letter
-        // character (digit, symbol, or non-ASCII letter) is not a clean anagram —
-        // reject it, mirroring the template path's ASCII `[a-z]`. The hybrid path
-        // (is_pure == false) is already governed by its anchored template regex.
-        if self.is_pure && has_other {
+        // A pure anagram rearranges letters, so a candidate carrying a *non-letter*
+        // — a digit, a symbol, `×`, `²` — is not a clean anagram and is rejected.
+        // Note what is no longer grounds for rejection: a non-ASCII *letter*. Those
+        // are letters like any other now, counted into `extra` if the pattern names
+        // them and into `foreign` if it does not.
+        if self.is_pure && candidate.has_other {
             return None;
         }
 
@@ -757,7 +997,7 @@ impl Pool {
             // The common case — no digit variables — hands the pre-computed
             // counter straight through without copying it.
             let found = if self.vars.is_empty() {
-                self.check_combo(base_counter, *base_size, &candidate_counter, candidate_len)
+                self.check_combo(base_counter, *base_size, candidate)
             } else {
                 let mut adjusted = *base_counter;
                 for &d in &self.vars {
@@ -768,14 +1008,9 @@ impl Pool {
                         // path `Result`-free if it ever slipped through.
                         return None;
                     }
-                    adjusted[(b - b'a') as usize] += 1;
+                    adjusted.ascii[(b - b'a') as usize] += 1;
                 }
-                self.check_combo(
-                    &adjusted,
-                    base_size + self.vars.len(),
-                    &candidate_counter,
-                    candidate_len,
-                )
+                self.check_combo(&adjusted, base_size + self.vars.len(), candidate)
             };
             if found.is_some() {
                 // `(...)` groups are combo-independent, so this one test decides
@@ -789,7 +1024,7 @@ impl Pool {
                 if !self
                     .contains
                     .iter()
-                    .all(|sp| candidate.contains(sp.as_str()))
+                    .all(|sp| candidate_str.contains(sp.as_str()))
                 {
                     return None;
                 }
@@ -931,14 +1166,40 @@ fn parse_pool(
 
     let template_letters: Vec<char> = template.map(template_literal_letters).unwrap_or_default();
 
-    let fixed_counter = count_chars(&fixed_letters);
+    // Every non-ASCII letter this pattern names, deduplicated, in first-seen
+    // order. This is what gives a `Histogram`'s `extra` slots their meaning, and
+    // it is empty for every ASCII pattern — which is every pattern anyone has
+    // typed against the shipped word list.
+    let mut alphabet: Vec<char> = Vec::new();
+    for &c in fixed_letters
+        .iter()
+        .chain(choices.iter().flatten())
+        .chain(template_letters.iter())
+    {
+        if !c.is_ascii() && !alphabet.contains(&c) {
+            alphabet.push(c);
+        }
+    }
+    if alphabet.len() > MAX_EXTRA_LETTERS {
+        return Err(PatternError(format!(
+            "Pattern names {} different non-ASCII letters; the limit is {}",
+            alphabet.len(),
+            MAX_EXTRA_LETTERS
+        )));
+    }
+
+    let fixed_counter = count_chars(&fixed_letters, &alphabet);
     let fixed_size = fixed_letters.len();
-    let combo_pools: Vec<([usize; 26], usize)> = choice_combos
+    let combo_pools: Vec<(Histogram, usize)> = choice_combos
         .iter()
         .map(|combo| {
             let mut counter = fixed_counter;
             for &c in combo {
-                counter[(c.to_ascii_lowercase() as u8 - b'a') as usize] += 1;
+                if let Some(i) = ascii_slot(c.to_ascii_lowercase()) {
+                    counter.ascii[i] += 1;
+                } else if let Some(j) = alphabet.iter().position(|&a| a == c) {
+                    counter.extra[j] += 1;
+                }
             }
             (counter, fixed_size + combo.len())
         })
@@ -950,7 +1211,8 @@ fn parse_pool(
         has_star,
         contains,
         vars,
-        template_counter: count_chars(&template_letters),
+        template_counter: count_chars(&template_letters, &alphabet),
+        alphabet,
         is_pure: template.is_none(),
     })
 }
@@ -985,12 +1247,23 @@ fn compile_anagram(
 
 /// Build an uppercase, alphabetically-sorted string of the letters in `more` that
 /// exceed `less` (per-letter, by count). Used to spell out unused and extra letters.
-fn diff_letters(more: &[usize; 26], less: &[usize; 26]) -> String {
+fn diff_letters(more: &Histogram, less: &Histogram, alphabet: &[char], foreign: usize) -> String {
     let mut out = String::new();
     for i in 0..26 {
-        for _ in 0..more[i].saturating_sub(less[i]) {
+        for _ in 0..more.ascii[i].saturating_sub(less.ascii[i]) {
             out.push((b'A' + i as u8) as char);
         }
+    }
+    for (j, &letter) in alphabet.iter().enumerate() {
+        for _ in 0..more.extra[j].saturating_sub(less.extra[j]) {
+            out.extend(letter.to_uppercase());
+        }
+    }
+    // Letters the pattern never named are always surplus, and only the word side
+    // ever has them. They were counted rather than identified on the hot path, so
+    // spell them as `?` — one per letter, which is what the count is good for.
+    for _ in 0..foreign {
+        out.push('?');
     }
     out
 }
@@ -1656,14 +1929,18 @@ mod tests {
 
     #[test]
     fn test_anagram_dot_matches_only_clean_letters() {
-        // `;.` must behave like the template `.`: a single ASCII letter, and
-        // nothing carrying non-letter cruft or non-ASCII letters.
+        // `;.` must behave like the template `.`: exactly one letter, and nothing
+        // carrying non-letter cruft. "Letter" now means letter in any script —
+        // that is the rule change — so what this pins is that *non-letters* are
+        // still rejected, whether they are ASCII or not.
         let m = compile_pattern(";.").unwrap();
         assert!(m("a").is_some());
+        assert!(m("\u{3c9}").is_some()); // ω is a letter like any other
         assert!(m(".c").is_none()); // stray '.'
         assert!(m("3a").is_none()); // digit
         assert!(m("a!").is_none()); // symbol
-        assert!(m("æ").is_none()); // non-ASCII letter
+        assert!(m("a\u{d7}").is_none()); // × is a non-ASCII *non-letter*
+        assert!(m("ab").is_none()); // still exactly one
     }
 
     #[test]
@@ -2635,6 +2912,113 @@ mod tests {
         assert!(m("kayak").is_some());
     }
 
+    // --- Unicode: canonicalize for matching, preserve for display ---
+    //
+    // These call the matcher directly, so they pass words already in canonical
+    // form — that is what `search` hands it. The load-time half is tested in
+    // `dictionary`, and the fold itself in `fold`.
+
+    #[test]
+    fn test_pattern_is_folded_before_it_is_compiled() {
+        // Both sides of the comparison are canonicalized, so how the user spells
+        // the pattern cannot matter. All three of these are the same matcher.
+        for pat in ["elan", "\u{c9}LAN", "\u{e9}lan"] {
+            let m = compile_pattern(pat).unwrap();
+            assert!(m("elan").is_some(), "{pat} should match the folded `elan`");
+        }
+        // And a pattern can name a multigraph letter directly.
+        assert!(compile_pattern("\u{c6}r\u{f8}").unwrap()("aero").is_some());
+    }
+
+    #[test]
+    fn test_dot_and_star_mean_any_letter() {
+        // Rule 2: a non-Latin letter is a letter, so the wildcards have to admit
+        // it. `[a-z]` was the same thing only while non-ASCII words could not
+        // reach the matcher at all.
+        assert!(compile_pattern(".....").unwrap()("\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}").is_some());
+        assert!(compile_pattern("*").unwrap()("\u{44f}\u{44f}").is_some());
+        assert!(compile_pattern("..").unwrap()("\u{6f22}\u{5b57}").is_some());
+        // A non-letter is still not a letter, ASCII or not.
+        assert!(compile_pattern(".").unwrap()("\u{d7}").is_none());
+        assert!(compile_pattern(".").unwrap()("7").is_none());
+    }
+
+    #[test]
+    fn test_vowel_and_consonant_stay_latin() {
+        // Deliberately *not* extended: "is ω a vowel" has no locale-free answer,
+        // so `@`/`#` keep their ASCII sets and a Greek word matches neither.
+        assert!(compile_pattern("#@#").unwrap()("cat").is_some());
+        assert!(compile_pattern("#@#").unwrap()("\u{3c9}\u{3bc}\u{3b5}").is_none());
+        assert!(compile_pattern("@").unwrap()("\u{3b1}").is_none());
+    }
+
+    #[test]
+    fn test_non_latin_letters_are_distinct_from_latin_ones() {
+        // The other half of rule 2, and the reason a transliterating fold would
+        // be wrong: ω must not answer to `o`.
+        assert!(compile_pattern("omega").unwrap()("\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}").is_none());
+        assert!(compile_pattern(";o").unwrap()("\u{3c9}").is_none());
+        // It answers to itself, spelled either way round in an anagram.
+        assert!(
+            compile_pattern(";\u{3b1}\u{3b2}\u{3b3}").unwrap()("\u{3b3}\u{3b2}\u{3b1}").is_some()
+        );
+        assert!(compile_pattern(";\u{3b1}\u{3b2}\u{3b3}").unwrap()("\u{3b1}\u{3b2}").is_none());
+    }
+
+    #[test]
+    fn test_anagram_mixes_scripts_and_reports_foreign_letters() {
+        // A pool naming non-ASCII letters gets `extra` slots for exactly those;
+        // any other letter is *foreign* — counted on the hot path, identified
+        // only here, where spelling it out is affordable.
+        let m = compile_pattern("...;\u{3b1}\u{3b2}\u{3b3}").unwrap();
+        let info = m("\u{3b2}\u{3b1}\u{3b3}").expect("an exact anagram should match");
+        assert_eq!(info.unused, "");
+        assert_eq!(info.extra, "");
+        // A hybrid pool tolerating one outside letter reports it as `?`.
+        let m = compile_pattern("....;\u{3b1}\u{3b2}\u{3b3}.").unwrap();
+        let info = m("\u{3b1}\u{3b2}\u{3b3}z").expect("one wildcard licenses one outsider");
+        assert_eq!(info.extra, "Z");
+    }
+
+    #[test]
+    fn test_non_ascii_non_letters_behave_like_ascii_ones() {
+        // Rule 1: nothing new here on purpose. `×` and `²` are exactly as
+        // unmatchable as `/` and `7` always were.
+        for junk in ["a\u{d7}", "a\u{b2}", "a\u{b0}", "a/", "a7"] {
+            assert!(
+                compile_pattern(";ab").unwrap()(junk).is_none(),
+                "{junk:?} should not be a clean anagram"
+            );
+        }
+    }
+
+    #[test]
+    fn test_too_many_non_ascii_letters_is_a_compile_error() {
+        // `Histogram::extra` is a stack array, so the alphabet has a hard ceiling.
+        // Exceeding it is a normal `PatternError`, never a silent truncation.
+        let many: String = (0x3b1..0x3b1 + MAX_EXTRA_LETTERS as u32 + 1)
+            .filter_map(char::from_u32)
+            .collect();
+        assert!(compile_pattern(&format!(";{many}")).is_err());
+        // One under the cap is fine.
+        let ok: String = (0x3b1..0x3b1 + MAX_EXTRA_LETTERS as u32)
+            .filter_map(char::from_u32)
+            .collect();
+        assert!(compile_pattern(&format!(";{ok}")).is_ok());
+    }
+
+    #[test]
+    fn test_structural_engine_stays_ascii_only() {
+        // The documented hold: the walker is byte-indexed, and that is what makes
+        // byte offsets char offsets. So a non-Latin word is reachable by `.....`
+        // but not by the same pattern with a fuzz suffix or a subpattern. Pinned
+        // so that lifting it later is a deliberate change rather than a surprise.
+        let greek = "\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}";
+        assert!(compile_pattern(".....").unwrap()(greek).is_some());
+        assert!(compile_pattern(".....`1").unwrap()(greek).is_none());
+        assert!(compile_pattern("(.....)").unwrap()(greek).is_none());
+    }
+
     // --- Subpatterns: `(...)` in the template half ---
 
     #[test]
@@ -2838,16 +3222,19 @@ mod tests {
     #[test]
     fn test_subpattern_syntax_errors() {
         for pat in [
-            "(;ab",        // unclosed
-            "(;ab)\u{e9}", // non-ASCII on this path
-            "(;ab))",      // unmatched close
-            "(ab`1;cd)",   // fuzz does not compose with an anagram pool
-            "(1`1)x",      // nor with a digit variable
-            "(;ab)`",      // malformed fuzz count
-            "(;ab)`1`2",   // two fuzz suffixes
+            "(;ab",         // unclosed
+            "(;ab)\u{3c9}", // a letter this engine cannot represent
+            "(;ab))",       // unmatched close
+            "(ab`1;cd)",    // fuzz does not compose with an anagram pool
+            "(1`1)x",       // nor with a digit variable
+            "(;ab)`",       // malformed fuzz count
+            "(;ab)`1`2",    // two fuzz suffixes
         ] {
             assert!(compile_pattern(pat).is_err(), "{pat} should be rejected");
         }
+        // An accented letter is *not* rejected any more: the pattern is folded
+        // before it is compiled, so `(;ab)é` arrives here as `(;ab)e`.
+        assert!(compile_pattern("(;ab)\u{e9}").is_ok());
     }
 
     // --- Digit variables moved off the regex path ---
@@ -3037,10 +3424,13 @@ mod tests {
         // the walker, whose first cut at byte 3 lands inside the `\u{f6}`.
         assert!(m("\u{f6}ible").is_none());
         assert!(m("\u{e9}\u{e9}\u{e9}").is_none());
-        // This is not a new restriction: the regex path's `*` is `[a-z]*` and
-        // rejects the same word, so the two engines agree.
+        // The two engines no longer agree here, and that is the documented split:
+        // the regex path's `*` is `\p{Alphabetic}*` and accepts a non-Latin
+        // letter, while this one is still byte-indexed and cannot. Words reaching
+        // a real search are folded first, so in practice this only shows up for a
+        // script the fold leaves non-ASCII.
+        assert!(compile_pattern("*ble").unwrap()("na\u{ef}vet\u{e9}ble").is_some());
         assert!(compile_pattern("*(;bel)").unwrap()("na\u{ef}vet\u{e9}ble").is_none());
-        assert!(compile_pattern("*ble").unwrap()("na\u{ef}vet\u{e9}ble").is_none());
         assert!(compile_pattern("*(;bel)").unwrap()("able").is_some());
     }
 

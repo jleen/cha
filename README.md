@@ -12,7 +12,7 @@ standalone crate.
 
 ## Word list
 
-A word list is provided, based on the [12dicts](https://wyrdplay.org/12dicts.html) lists. You can also provide your own word list as a text file, one lowercase word per line.
+A word list is provided, based on the [12dicts](https://wyrdplay.org/12dicts.html) lists. You can also provide your own word list as a text file, one word per line; case and accents are normalized for matching and preserved for display.
 
 The GUI expects user-provided word list files to be located in a designated directory
 (see below).  If you’re building your own binaries,
@@ -103,6 +103,24 @@ letters after `;` are the pool.
 t....;intra       # starts with T, is an anagram of INTRA
 ;(che)rostra      # anagram of CHEROST RA that contains CHE exactly
 ```
+
+### Accents and other scripts
+
+Patterns and words are matched in a canonical form: **case and accents are
+ignored, and the original spelling comes back.** So `elan` finds ÉLAN and prints
+it as `élan`, and `naivete` finds `naïveté`. It works in both directions — you can
+type the accents if you like.
+
+A few letters that Unicode treats as their own rather than as accented ones are
+written out the way they are spelled: `æ`→`ae`, `ø`→`o`, `þ`→`th`, `ð`→`d`,
+`ł`→`l`, `ß`→`ss`. So `aero` finds ÆRØ and `strasse` finds STRASSE. **Length is
+counted after that**, so ÆRØ is four letters and matches `....`, not `...`.
+
+Letters from other scripts are letters in their own right, not spellings of Latin
+ones: `ω` is not `o`, so `.....` matches ΩΜΈΓΑ but `omega` does not. `@` and `#`
+stay Latin-only — there is no locale-free answer to whether `ω` is a vowel.
+Anything that is not a letter, in any script, is treated as `cha` has always
+treated `7` and `/`.
 
 ### Subpatterns
 

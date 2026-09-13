@@ -1,13 +1,89 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
 
-/// Shared per-line logic: trim, lowercase, and append if non-empty and unseen.
+use crate::fold::fold;
+
+/// One dictionary entry: what to show, and what to match against.
+///
+/// The two differ only when canonicalizing changes something beyond case — an
+/// accent, a stroked letter, a ligature. That is 0.8% of a large real word list
+/// and 0% of the shipped `words.txt`, so `folded` is `None` for almost every
+/// entry and the second buffer is paid for only where it buys something.
+///
+/// **`text` is lowercased but keeps its accents.** Lowercasing is what the
+/// loader has always done; keeping the accent is the point of the exercise, so
+/// a search for `elan` returns `élan` rather than flattening it. Keeping the
+/// *case* as well was measured and rejected: 99.9% of a 6M-entry title list
+/// differs from its lowercase form, so it would mean a second string for
+/// essentially every word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Word {
+    /// The form the matcher sees. A bare `Box<str>` so [`Word::folded`] is a
+    /// pointer deref with no arithmetic: it is called once per word per query,
+    /// and the scan's reject path is short enough that a bounds-checked slice
+    /// shows up in the perf suite.
+    folded: Box<str>,
+    /// The form to show, when it differs from `folded`. `None` for the 99.2% of
+    /// entries that are already canonical, so the second allocation is paid for
+    /// only where it buys an accent.
+    display: Option<Box<str>>,
+}
+
+impl Word {
+    /// Build from an already-trimmed, non-empty line.
+    fn new(line: &str) -> Self {
+        let text = line.to_lowercase();
+        match fold(&text) {
+            // `fold` borrows when the text is already canonical, which is the
+            // common case and the one worth not paying for.
+            Cow::Borrowed(_) => Word {
+                folded: text.into_boxed_str(),
+                display: None,
+            },
+            Cow::Owned(folded) => Word {
+                folded: folded.into_boxed_str(),
+                display: Some(text.into_boxed_str()),
+            },
+        }
+    }
+
+    /// What to display: lowercased, accents intact.
+    #[inline]
+    pub fn text(&self) -> &str {
+        self.display.as_deref().unwrap_or(&self.folded)
+    }
+
+    /// What to match against. See [`fold`](crate::fold::fold).
+    #[inline]
+    pub fn folded(&self) -> &str {
+        &self.folded
+    }
+}
+
+impl From<&str> for Word {
+    /// Build a single entry, applying the same trim-and-canonicalize the loader
+    /// does. Handy for callers assembling a list in memory, and for tests.
+    fn from(line: &str) -> Self {
+        Word::new(line.trim())
+    }
+}
+
+/// Shared per-line logic: trim, canonicalize, and append if non-empty and unseen.
 /// Handles one line at a time so callers can stream without holding whole files.
-fn add_word(line: &str, seen: &mut HashSet<String>, words: &mut Vec<String>) {
-    let word = line.trim().to_lowercase();
-    if !word.is_empty() && seen.insert(word.clone()) {
+///
+/// **Dedup is keyed on the display form, not the folded one.** `elan` and `élan`
+/// are different entries and a search matching one should return both; collapsing
+/// them would canonicalize and then discard, which is the opposite of the point.
+fn add_word(line: &str, seen: &mut HashSet<String>, words: &mut Vec<Word>) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let word = Word::new(trimmed);
+    if seen.insert(word.text().to_string()) {
         words.push(word);
     }
 }
@@ -17,7 +93,7 @@ fn add_word(line: &str, seen: &mut HashSet<String>, words: &mut Vec<String>) {
 /// dictionary directory) and show which list a match came from.
 pub struct NamedWordList {
     pub name: String,
-    pub words: Vec<String>,
+    pub words: Vec<Word>,
 }
 
 /// Append every regular, non-hidden file in `dir` to `builder`, each as its own
@@ -147,7 +223,7 @@ impl WordListBuilder {
     /// Consume the builder and return the deduplicated word list, flat: every
     /// source's words concatenated in order. Dedup was already global, so this
     /// matches the pre-grouping behavior.
-    pub fn finish(self) -> Vec<String> {
+    pub fn finish(self) -> Vec<Word> {
         self.sources.into_iter().flat_map(|s| s.words).collect()
     }
 
@@ -164,7 +240,7 @@ impl WordListBuilder {
 
 /// Load a word list from a file, streaming one line at a time. Peak memory is
 /// ~1x the final word list, which matters for very large alternate lists.
-pub fn load_words(path: &str) -> io::Result<Vec<String>> {
+pub fn load_words(path: &str) -> io::Result<Vec<Word>> {
     let mut builder = WordListBuilder::new();
     builder.add_file(Path::new(path))?;
     Ok(builder.finish())
@@ -172,7 +248,7 @@ pub fn load_words(path: &str) -> io::Result<Vec<String>> {
 
 /// Load a word list from an in-memory string. Used for the GUI's word list,
 /// which is embedded in the binary via `include_str!` and already fully resident.
-pub fn load_words_from_str(text: &str) -> Vec<String> {
+pub fn load_words_from_str(text: &str) -> Vec<Word> {
     let mut builder = WordListBuilder::new();
     builder.add_str(text);
     builder.finish()
@@ -182,6 +258,53 @@ pub fn load_words_from_str(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// The display forms, for comparing against a literal list.
+    fn texts(words: &[Word]) -> Vec<&str> {
+        words.iter().map(Word::text).collect()
+    }
+
+    #[test]
+    fn accents_survive_into_the_display_form() {
+        // The point of the exercise: match canonically, hand back the original.
+        let w = Word::from("\u{c9}lan");
+        assert_eq!(w.text(), "\u{e9}lan"); // lowercased, accent intact
+        assert_eq!(w.folded(), "elan"); // what the matcher sees
+    }
+
+    #[test]
+    fn canonical_words_carry_no_second_buffer() {
+        // 99.2% of a large real list takes this path, and all of the shipped one.
+        // If it ever starts allocating, memory doubles for no benefit.
+        let w = Word::from("cat");
+        assert_eq!(w.text(), "cat");
+        assert_eq!(w.folded(), "cat");
+        assert!(
+            w.display.is_none(),
+            "an ASCII word should store one form, not two"
+        );
+        // And the accented case genuinely needs the second one.
+        assert!(Word::from("\u{e9}lan").display.is_some());
+    }
+
+    #[test]
+    fn dedup_is_keyed_on_the_display_form() {
+        // `elan` and `élan` fold together but are different words, and a search
+        // matching one should return both. Collapsing them would canonicalize and
+        // then discard, which is the opposite of the point.
+        let mut b = WordListBuilder::new();
+        b.add_str("elan\n\u{e9}lan\n\u{c9}LAN\nElan\n");
+        // Four lines, two distinct display forms: the two ASCII spellings collapse
+        // by case as they always did, and the two accented ones likewise.
+        assert_eq!(texts(&b.finish()), vec!["elan", "\u{e9}lan"]);
+    }
+
+    #[test]
+    fn multigraph_entries_fold_for_matching_and_keep_their_spelling() {
+        let w = Word::from("\u{c6}r\u{f8}");
+        assert_eq!(w.text(), "\u{e6}r\u{f8}");
+        assert_eq!(w.folded(), "aero");
+    }
 
     #[test]
     fn dedups_and_normalizes_across_sources() {
@@ -203,7 +326,7 @@ mod tests {
         let words = builder.finish();
 
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(words, vec!["apple", "banana", "cherry"]);
+        assert_eq!(texts(&words), vec!["apple", "banana", "cherry"]);
     }
 
     #[test]
@@ -222,8 +345,8 @@ mod tests {
         let groups = builder.finish_grouped();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].name, "Built-in");
-        assert_eq!(groups[0].words, vec!["apple", "banana"]);
+        assert_eq!(texts(&groups[0].words), vec!["apple", "banana"]);
         assert_eq!(groups[1].name, "extra");
-        assert_eq!(groups[1].words, vec!["cherry"]);
+        assert_eq!(texts(&groups[1].words), vec!["cherry"]);
     }
 }

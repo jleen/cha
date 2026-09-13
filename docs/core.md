@@ -42,6 +42,76 @@ question (the `Vec<String>` and its dedup `HashSet` at load time) rather than an
 algorithmic one. `--words <path>` exists so that can be re-checked against a real
 large list without committing one.
 
+### What people actually type, and what that means for triage
+
+Three shapes dominate real use. When a change costs something, it matters far
+more where the cost lands than what the corpus mean says:
+
+| Shape | Example | Priority |
+|---|---|---|
+| Dotted, no anagram | `.....`, `..o..e.`, `c.t` | **highest** |
+| Dotted plus anagram (hybrid) | `........;gdangboot` | **highest** |
+| Pure anagram | `;..oting`, `;obelisk` | **highest** |
+| Starred | `*ing`, `*a*e*i*o*` | secondary |
+| Fuzz, digit variables, subpatterns | `` cathode`1 ``, `1221`, `(;oif)(;bel)` | secondary |
+
+A regression on a starred or fuzzy pattern is worth accepting for a real gain
+elsewhere. A regression on the first three is worth working to avoid — they are
+what a crossword solver types all day, and they are also the cheapest scans in
+the crate, so a fixed per-word cost shows up there as the largest percentage.
+`perf.sh --compare` reports per pattern precisely so this triage is possible;
+don't summarize it to a single number.
+
+### Performance log
+
+Percentages, not milliseconds, and **always measured against an interleaved
+same-session baseline** (`git stash` → build → `--save` → `git stash pop` →
+build → `--compare`). Absolute times drift by several percent between runs on an
+idle machine and by much more on a busy one; a baseline taken an hour earlier has
+been mistaken for a regression twice in this file's history. Percentages between
+consecutive milestones are the only numbers here that keep their meaning.
+
+One row per commit that moved the needle, end to end. If a change is a wash,
+say so — the point of the log is to catch *creep*, which is invisible one
+commit at a time.
+
+| Milestone | Dotted | Dotted+anagram | Pure anagram | Starred | Other |
+|---|---|---|---|---|---|
+| Subpatterns (`8a2fd60`) | — | — | **−7 to −9%** | — | — |
+| Two engines (`a8d6cad`) | — | — | — | — | backref **−87%**, pathological **−68%**, cheap fuzz **+8-10%** |
+| Unicode folding | **+7-9%** | **+10-14%** | **+2-4%** | +9-13% | fuzz/digit/subpattern +3-4% |
+
+**Ranges, because point values here are false precision.** Two interleaved
+same-session runs of the same two builds, 25 reps each on an idle machine,
+disagreed by about 3 percentage points per group — `+7.4%` and `+8.8%` for the
+dotted group, `+10.3%` and `+13.9%` for the hybrid. That is the resolution this
+harness actually has for a change of this size. Quote a range, take at least two
+runs before believing a number worth recording, and treat a single run's figure
+as a hypothesis. It follows that a *small* regression cannot be attributed to a
+*specific* line: when a targeted fix moved the hybrid group from ~15% to ~10-14%,
+that overlapped the noise band, and the honest reason to keep it was that it does
+strictly less work per word, not that the suite proved it.
+
+Notes on each:
+
+- **Subpatterns** added a matching engine but changed no existing path. The
+  anagram gain is incidental: extracting `Pool` moved the `(...)` substring test
+  off the per-combination path and onto the confirmed-match path where it belongs.
+- **Two engines** retired the fuzzy matcher and moved digit variables off the
+  regex, which is where the large gains come from — `backref` went 403 ms to
+  53 ms as a tier. The cost was 8-10% on *cheap* fuzzy patterns, accepted
+  deliberately: fuzz is an uncommon shape, and merging deleted a duplicated
+  engine. See the table in "Two engines" below.
+- **Unicode folding** is a uniform tax from carrying two forms per word, not one
+  effect. Four causes were found and fixed before it came down from +165%; see
+  "What it cost, and where". What remains is within budget — the highest-priority
+  shape sits at ~1.25 ms against a 10 ms target — but it is the row to watch,
+  because it is the first entry here that made the common cases slower. The
+  largest single lever left, if it ever needs one, is that `Word` is 32 bytes
+  against the 24 a `String` took: the scan touches every one of them, and a
+  24-byte packing (one buffer, an offset) costs a bounds check on the hot
+  accessor in exchange. That trade was not measured conclusively either way.
+
 ### The suite: `cha-core/examples/perf.rs`
 
 ```
@@ -216,6 +286,53 @@ both distinctly: a per-word branch on pattern syntax appears as a uniform
 slowdown across a whole tier, while a broken length early-out appears on exactly
 the patterns whose `fixed_len` is `Some` and nowhere else.
 
+## Unicode: canonicalize for matching, preserve for display
+
+Words and patterns are both matched in the canonical form
+[`fold`](../cha-core/src/fold.rs) produces — case and diacritics removed, plus a
+small table for the Latin letters Unicode gives no decomposition — and the
+*original* spelling is what comes back. `dictionary::Word` carries both forms.
+
+Design notes worth keeping:
+
+- **Fold both sides or neither.** `compile_pattern_checked_with` folds the
+  pattern once, up front. Everything downstream then compares like with like, and
+  no per-word normalization exists to go wrong.
+- **The table is a transcription, not a judgement.** `MULTIGRAPHS` was checked row
+  by row against CLDR's `Latin-ASCII` transform with `uconv`. Reaching for a
+  transliteration crate instead is the trap: those romanize *everything* and turn
+  `omega` into `o`, destroying the rule that a non-Latin letter is its own letter.
+- **Length is counted in canonical letters.** `Ærø` is four and `Straße` is seven.
+  That falls out of the fold rather than being chosen, and for a word puzzle it is
+  arguably right anyway — German crosswords already spell `ß` as SS.
+- **Dedup is keyed on the display form.** `elan` and `élan` fold together but are
+  different words, and a search matching one should return both.
+
+### What it cost, and where
+
+Match counts on `words.txt` — 100% ASCII — are unchanged, which is the proof the
+fold is a no-op for anyone not using it. The time was not free, and four separate
+causes had to be found before it came down from **+165%** to +7-22%:
+
+| cause | symptom | fix |
+|---|---|---|
+| `\p{Alphabetic}` compiled per query | +165% on `.........` | build the wide class **lazily** — `search` recompiles the pattern on every call, so compilation is hot in a way match time usually hides |
+| `Word::folded` crossing a crate boundary | uniform +15%, every tier | `#[inline]` |
+| `Histogram` zeroing 336 bytes per word | +13% on the anagram tier | `u32` counters: 168 bytes, *less* than the `[usize; 26]` it replaced |
+| the non-ASCII test in front of the common case in `tally` | +22-46% on hybrids | test `is_ascii_alphabetic` first, as the original loop did |
+
+What remains is worst on starred templates (`*ing`, `*a*e*i*o*`), where there is
+no length filter to reject a word before the matcher must ask whether it is ASCII.
+A superset class cheap enough to answer without asking was tried —
+`[a-z\x{80}-\x{10FFFF}]` — and is not available: it made `*` 2.2x and `*a*` 3.5x
+*slower*, because spanning every non-ASCII scalar costs the engine more than the
+scan it saves. Absolute numbers stay far inside the targets at the top of this
+file: `.....` at 1.23 ms against a 10 ms budget.
+
+**The perf suite now has a `unicode` tier.** It had no non-ASCII coverage at all
+before, which is why it could not have caught the `(;glo)` bug and would not have
+caught a folding regression either.
+
 ## Two engines, and why the boundary is where it is
 
 `needs_structural` sends subpatterns, digit variables and `` `N `` fuzz to the
@@ -289,12 +406,20 @@ Three properties make it cheap:
   in `ele(ph)ant` constrain nothing that `elephant` doesn't, so they cost
   nothing. Nested groups inside a spliced one are still found.
 
-**The engine is ASCII-only**, like the fuzzy one, and that is load-bearing rather
-than incidental: with an ASCII-only pattern no token can consume a non-ASCII
-byte, so byte offsets are char offsets, every slice it takes is on a char
-boundary, and the length early-out is exact. This costs nothing in practice — the
-regex path's `*` is `[a-z]*` and rejects the same words. `slice_str` still checks
-`from_utf8`, so a cut landing mid-character is a non-match rather than a panic.
+**The engine is ASCII-only**, and that is load-bearing rather than incidental:
+with an ASCII-only pattern no token can consume a non-ASCII byte, so byte offsets
+are char offsets, every slice it takes is on a char boundary, and the length
+early-out is exact. `slice_str` still checks `from_utf8`, so a cut landing
+mid-character is a non-match rather than a panic.
+
+This used to cost nothing, because the regex path's `*` was `[a-z]*` and rejected
+the same words. Since folding it does: the regex path matches a word the fold
+leaves non-ASCII and this one cannot, so `.....` matches a Greek word and
+`` .....`1 `` does not. `test_structural_engine_stays_ascii_only` pins that split
+so lifting it is a deliberate change. Lifting it means moving the walker to char
+indices, which is its own perf question — and the fold makes the case rare rather
+than absent: under 1% of a large real word list survives folding as non-ASCII, and
+none of `words.txt`.
 
 ### Absorption: which letters excuse the outer pool
 

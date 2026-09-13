@@ -176,6 +176,16 @@ const CORPUS: &[Probe] = &[
     Probe { tier: "subpattern", pattern: "(1234)(;1234)", exercises: "a variable bound in one block and spent in the next" },
     Probe { tier: "subpattern", pattern: "*(;bel)", exercises: "open-ended block: every cut offset is tried" },
     Probe { tier: "subpattern", pattern: "*(;ing)*", exercises: "block between two stars: the realistic max_structural_steps floor (51)" },
+    // Unicode. The suite had no non-ASCII coverage at all before folding landed,
+    // which is why it could not have caught the `(;glo)` bug and would not catch
+    // a folding regression either. These run against the same ASCII `words.txt`
+    // as everything else — what they exercise is the *pattern* side of the fold
+    // and the wide-class fallback, not a different word list. Point `--words` at
+    // `deploy/dictionaries/wikipedia.dict` to exercise the word side.
+    Probe { tier: "unicode", pattern: "élan", exercises: "accented pattern: folded at compile, so it compiles to the ASCII matcher" },
+    Probe { tier: "unicode", pattern: "Ærø", exercises: "multigraph pattern: one char becomes two letters" },
+    Probe { tier: "unicode", pattern: ";ωμέγα", exercises: "non-ASCII pool: the Histogram `extra` slots and the foreign count" },
+    Probe { tier: "unicode", pattern: "ω....", exercises: "non-ASCII literal: no ASCII word can match, so this is pure reject cost" },
     // Composition. Both spellings of one conjunction are here as a pair on
     // purpose: whitespace around `&` is separator, so they must stay identical in
     // match count (260 on the committed words.txt) and in cost. They once

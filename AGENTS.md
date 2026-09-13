@@ -114,11 +114,17 @@ the user and must not build. See the mobile section.
 
 ## Non-obvious invariants
 
-**Words are pre-lowercased.** `dictionary::load_words` lowercases every word
-at load time. Matchers must not call `.to_lowercase()` on words in the hot
-loop — it allocates a `String` per word and is redundant. The anagram closure
-relies on this: it calls `count_str` directly on `word` without any case
-conversion.
+**Words are pre-folded, and carry two forms.** `dictionary::Word` holds what to
+*display* (lowercased, accents kept) and what to *match* (the canonical form from
+[`fold`](cha-core/src/fold.rs)); `search` passes `word.folded()` to the matcher
+and puts `word.text()` in the row. Matchers must not lowercase, normalize or
+fold in the hot loop — all of it happened at load. **Fold the pattern too, or the
+two sides stop speaking the same alphabet**; `compile_pattern_checked_with` does
+it once, up front.
+
+**`Word::folded` is `#[inline]`, and that is load-bearing.** It is called once
+per word per query from another crate; letting it cross the boundary uninlined
+measured as ~15% across every tier of the perf suite.
 
 **The anagram pool is pre-computed.** `compile_anagram` builds `combo_pools`
 — a `Vec<([usize; 26], usize)>` — before the closure is returned. Each entry
@@ -126,10 +132,16 @@ is the pre-summed character counter and size for `fixed_letters + one combo`.
 Nothing in the per-word hot path touches a `Vec` or `HashMap` for pool
 accounting.
 
-**Character counting uses `[usize; 26]`, never `HashMap`.** Indexing by
-`(byte - b'a')` is O(1) with no allocation. The `count_str` helper (bytes,
-not chars) is the right function to call from the anagram closure. `count_chars`
-(takes `&[char]`) is only used at pattern compile time.
+**Character counting uses a fixed-size `Histogram`, never `HashMap`.** `a`-`z`
+indexes by `(byte - b'a')`; the handful of non-ASCII letters a *pattern* names get
+numbered slots beside it, and any other letter is counted as `foreign` rather than
+identified. `tally` (bytes, switching to chars only when it meets a non-ASCII one)
+is the right function to call from the anagram closure; `count_chars` is compile
+time only.
+
+**The counters are `u32` on purpose.** The histogram is zeroed once per candidate
+word, so its size *is* per-word work — at `usize` it cost 13% on the anagram tier.
+Widening them back, or growing `MAX_EXTRA_LETTERS` much, costs real time.
 
 **Punctuation stripping uses `Cow<str>` to avoid allocation.** In
 `compile_pattern`, `test_word` borrows the original word when neither the
@@ -191,9 +203,16 @@ Before *and* after any change to matching, pattern compilation, or a `Limits`
 default:
 
 ```
-./scripts/perf.sh --save      # on the "before" build (git stash, build)
-./scripts/perf.sh --compare   # on the "after" build
+git stash -u && cargo build --release   # the "before" build
+./scripts/perf.sh --save
+git stash pop && cargo build --release  # the "after" build
+./scripts/perf.sh --compare
 ```
+
+**Interleave the two builds like that.** A baseline from an hour ago is not a
+baseline: sub-millisecond patterns drift several percent on an idle machine and
+much more under your own `cargo build` load. That has been mistaken for a
+regression twice.
 
 It covers every matching path, diffs match counts as well as times, and judges
 deltas against a noise floor it measures — re-timing anything it flags, so a
@@ -205,6 +224,16 @@ docs, the GUI/web/mobile shells, the front end, and the workflows. New pattern
 syntax adds its own entry to `perf.rs`'s corpus in the same commit.
 `cha <pattern> -b <N>` is a quick spot check only: it bypasses `search` and
 reports a bare mean.
+
+**Triage by shape, and log what you cost.** The three shapes people actually
+type — dotted (`..o..e.`), dotted-plus-anagram (`........;gdangboot`), and pure
+anagram (`;..oting`) — are the ones to protect; a starred or fuzzy pattern can
+afford to lose a few percent for a real gain elsewhere. They are also the
+cheapest scans, so a fixed per-word cost shows up there as the largest
+percentage. When a change moves any of them, add a row to the performance log in
+[docs/core.md](docs/core.md) — percentages between milestones, because absolute
+times drift. The log exists to catch creep, which is invisible one commit at a
+time.
 
 **Don't quote a number you can't trust.** If the suite's verdict is `NOISY` or
 `UNRELIABLE`, or the machine is inherently suspect — a cloud sandbox, a shared CI
@@ -278,9 +307,12 @@ keep the two transports speaking one protocol. No current argument has two words
   `MatchInfo` strings built by `diff_letters` are fine — they only allocate once a
   word has already been confirmed as a match, which is comparatively rare.)
 - Do not call `count_chars` inside the closure. Pool counters are pre-computed;
-  only `count_str(word)` belongs inside the closure.
-- Do not replace `[usize; 26]` with `HashMap` in the character-counting code.
-  The HashMap version was ~6× slower on anagram queries.
+  only `tally(word, alphabet)` belongs inside the closure.
+- Do not replace the `Histogram` arrays with a `HashMap` keyed by `char`, however
+  tempting once letters are Unicode. The HashMap version was ~6× slower on anagram
+  queries when the alphabet was only ASCII, and the alphabet is still tiny: a
+  pattern names a handful of non-ASCII letters at most, and a word's other letters
+  need counting, not naming.
 - Do not add a backtracking or combinatorial path to `pattern.rs` without a
   ceiling in `Limits`, and do not call `cartesian_product` without checking the
   product size first. See the `Limits` section — every such path is reachable

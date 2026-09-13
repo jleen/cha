@@ -1,4 +1,4 @@
-use cha_core::dictionary;
+use cha_core::dictionary::{self, Word};
 use cha_core::pattern;
 
 use clap::Parser;
@@ -7,6 +7,7 @@ use std::io::{IsTerminal, Write};
 use std::process;
 use std::time::Instant;
 use terminal_size::{terminal_size, Width};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Parser)]
 struct Args {
@@ -53,14 +54,18 @@ impl<'a> MatchItem<'a> {
     }
 
     /// Display width in terminal columns. Color codes are not display width, so
-    /// they are deliberately excluded; the word and delta are ASCII, so byte
-    /// length equals column count.
+    /// they are deliberately excluded.
+    ///
+    /// Byte length is *not* column count any more: a displayed word keeps its
+    /// accents, so `élan` is five bytes and four columns. `unicode-width`
+    /// implements UAX #11, which also gets the cases byte length and char count
+    /// both miss — a CJK entry is two columns per character.
     fn width(&self) -> usize {
-        self.word.len()
+        UnicodeWidthStr::width(self.word)
             + if self.delta.is_empty() {
                 0
             } else {
-                1 + self.delta.len()
+                1 + UnicodeWidthStr::width(self.delta.as_str())
             }
     }
 
@@ -157,7 +162,7 @@ fn print_columns(items: &[MatchItem], out: &mut impl Write) {
     }
 }
 
-fn run_pattern(pat: &str, words: &[String], delta: bool) {
+fn run_pattern(pat: &str, words: &[Word], delta: bool) {
     let matcher = match pattern::compile_pattern_checked(pat) {
         // A contentless pattern (e.g. a bare `;`) matches nothing; report the
         // gentle note plainly and skip the scan. It's not an error.
@@ -179,9 +184,10 @@ fn run_pattern(pat: &str, words: &[String], delta: bool) {
     let choice = anstream::AutoStream::choice(&raw);
     let columns = raw.is_terminal();
 
+    // Match the canonical form, print the display one. See `dictionary::Word`.
     let items: Vec<MatchItem> = words
         .iter()
-        .filter_map(|w| matcher(w).map(|info| MatchItem::new(w, &info, delta)))
+        .filter_map(|w| matcher(w.folded()).map(|info| MatchItem::new(w.text(), &info, delta)))
         .collect();
 
     // Buffer into a Vec-backed AutoStream (BufWriter isn't a RawStream), then
@@ -266,7 +272,7 @@ fn main() {
         let start = Instant::now();
         for _ in 0..args.bench_count {
             for word in &words {
-                let _ = matcher(word);
+                let _ = matcher(word.folded());
             }
         }
         let elapsed = start.elapsed();

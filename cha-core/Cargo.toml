@@ -15,6 +15,7 @@ regex = "1.13.1"
 # profile assumes. (Feature unification means a `--workspace` build compiles it
 # with serde on regardless, so the saving is real only for the CLI alone.)
 serde = { version = "1", features = ["derive"], optional = true }
+unicode-normalization = "0.1.25"
 
 [features]
 serde = ["dep:serde"]

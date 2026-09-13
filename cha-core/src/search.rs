@@ -125,11 +125,14 @@ pub fn search(
                 }
             }
             for word in chunk {
-                if let Some(info) = (compiled.matcher)(word) {
+                // Match against the canonical form, report the display one —
+                // see `Word`. This is the whole of "canonicalize and preserve"
+                // at the scan level.
+                if let Some(info) = (compiled.matcher)(word.folded()) {
                     total += 1;
                     if total <= limits.max_results {
                         matches.push(MatchRow {
-                            word: word.clone(),
+                            word: word.text().to_string(),
                             unused: info.unused,
                             extra: info.extra,
                         });

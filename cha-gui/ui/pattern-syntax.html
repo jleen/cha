@@ -81,6 +81,32 @@ electron`2  # up to two letters off
 t....;intra       # starts with T, is an anagram of INTRA
 ;(che)rostra      # anagram of CHEROST RA that contains CHE exactly</code></pre>
 
+      <h2>Accents and other scripts</h2>
+      <p>
+        Patterns and words are matched in a canonical form: <strong>case and
+        accents are ignored, and the original spelling comes back.</strong> So
+        <code>elan</code> finds ÉLAN and shows it as <code>élan</code>, and
+        <code>naivete</code> finds <code>naïveté</code>. It works in both
+        directions — you can type the accents if you like.
+      </p>
+      <p>
+        A few letters that Unicode treats as their own rather than as accented
+        ones are written out the way they are spelled: <code>æ</code>→<code>ae</code>,
+        <code>ø</code>→<code>o</code>, <code>þ</code>→<code>th</code>,
+        <code>ð</code>→<code>d</code>, <code>ł</code>→<code>l</code>,
+        <code>ß</code>→<code>ss</code>. So <code>aero</code> finds ÆRØ.
+        <strong>Length is counted after that</strong>, so ÆRØ is four letters and
+        matches <code>....</code>, not <code>...</code>.
+      </p>
+      <p>
+        Letters from other scripts are letters in their own right, not spellings
+        of Latin ones: <code>ω</code> is not <code>o</code>, so <code>.....</code>
+        matches ΩΜΈΓΑ but <code>omega</code> does not. <code>@</code> and
+        <code>#</code> stay Latin-only — there is no locale-free answer to whether
+        <code>ω</code> is a vowel. Anything that is not a letter, in any script, is
+        treated the way <code>7</code> and <code>/</code> have always been.
+      </p>
+
       <h2>Subpatterns</h2>
       <p>
         Parentheses in the template introduce a <em>subpattern</em>: a whole
