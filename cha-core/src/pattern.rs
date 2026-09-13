@@ -367,11 +367,16 @@ fn unicode_match(
         .map(|_| MatchInfo::default())
 }
 
-fn build_template_regex(template: &str, class: &str) -> Result<regex::Regex, PatternError> {
-    let (regex_str, _) = template_to_regex(template, class)?;
+/// Anchor and build. `template` is carried only for the error message.
+fn compile_anchored(regex_str: &str, template: &str) -> Result<regex::Regex, PatternError> {
     RegexBuilder::new(&format!("(?i)^{}$", regex_str))
         .build()
         .map_err(|e| PatternError(format!("Invalid template '{}': {}", template, e)))
+}
+
+fn build_template_regex(template: &str, class: &str) -> Result<regex::Regex, PatternError> {
+    let (regex_str, _) = template_to_regex(template, class)?;
+    compile_anchored(&regex_str, template)
 }
 
 fn compile_template(template: &str) -> Result<Matcher, PatternError> {
@@ -400,8 +405,12 @@ fn compile_template(template: &str) -> Result<Matcher, PatternError> {
     // linear time with no ceiling to trip. That is why this path cannot silently
     // truncate a result set, and why it no longer needs a `Limits` field: the
     // engine's own guarantee replaces the one we used to have to impose.
-    let (_, fixed_len) = template_to_regex(template, ANY_LETTER_ASCII)?;
-    let ascii_re = build_template_regex(template, ANY_LETTER_ASCII)?;
+    // One parse, used for both the length bound and the regex. `search` compiles
+    // the pattern on every call, so compile-time work is charged to every query;
+    // parsing the template twice to get two halves of the same result is the kind
+    // of thing that hides there.
+    let (ascii_str, fixed_len) = template_to_regex(template, ANY_LETTER_ASCII)?;
+    let ascii_re = compile_anchored(&ascii_str, template)?;
     let owned = template.to_string();
     let unicode_re: OnceCell<Option<regex::Regex>> = OnceCell::new();
 
