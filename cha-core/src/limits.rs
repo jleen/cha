@@ -23,12 +23,14 @@
 //! it silently narrows the pattern language. The defaults below are calibrated
 //! against that risk — see [`Limits::interactive`].
 //!
-//! Neither match-time limit costs anything measurable to *enforce*.
+//! No match-time limit costs anything measurable to *enforce*.
 //! `backtrack_limit` only picks the threshold `fancy-regex` compares against; it
 //! increments its counter unconditionally either way. And `max_fuzzy_steps` was
 //! measured against a build with the counter removed outright — with the timing
 //! harness now in `examples/perf.rs` — which came out a wash or slightly slower,
 //! the difference being codegen noise rather than the decrement.
+//! `max_structural_steps` is the same kind of counter on the same kind of
+//! recursion.
 
 use std::time::Instant;
 
@@ -55,6 +57,15 @@ pub struct Limits {
     /// happens during compile, no scan deadline can catch it — the check has to
     /// stay where it is, before the product is built.
     pub max_anagram_combos: usize,
+
+    /// Maximum nesting depth of `(...)` subpatterns in a template.
+    ///
+    /// Compile-time. `compile_node` recurses once per nesting level, so without
+    /// a cap a short pattern like `((((((;a))))))` — or the 500-deep version
+    /// `max_pattern_len` still admits — turns into deep compile-time recursion.
+    /// Real patterns nest once or twice; this is pure insurance, and exceeding
+    /// it is a normal `PatternError`.
+    pub max_subpattern_depth: usize,
 
     // ---- Match-time: re-armed per candidate word. ----
     /// Maximum regex backtracking steps **per word** (`fancy-regex`'s own unit).
@@ -86,6 +97,20 @@ pub struct Limits {
     /// fuzz allowance) and from its recursion depth, which is naturally bounded
     /// — it is the node count, and only the node count, that was unbounded.
     pub max_fuzzy_steps: u32,
+
+    /// Maximum structural-matcher nodes explored **per word**.
+    ///
+    /// Match-time. Applies to the subpattern path, whose `Star` arm recurses
+    /// twice per node and whose `Sub` arm tries every split offset its length
+    /// bounds allow — two sources of branching layered on each other, with no
+    /// engine underneath to impose a limit of its own. A pattern whose elements
+    /// all have a fixed length never branches at all (the split is forced), so
+    /// this binds only on shapes like `*(;ab)*(;cd)*`.
+    ///
+    /// Like `max_fuzzy_steps`, this is the node count and nothing else: the
+    /// recursion depth is naturally bounded by tokens + word length, and the
+    /// variable environment is passed by value rather than unwound.
+    pub max_structural_steps: u32,
 
     /// Maximum rows materialized across *all* groups combined.
     ///
@@ -140,10 +165,14 @@ impl Limits {
             max_pattern_len: 1024,
             // ~21 MB of `combo_pools`. Real patterns use a handful of groups.
             max_anagram_combos: 100_000,
+            // Nesting past this is a typo, not a query.
+            max_subpattern_depth: 8,
             // ~15x the worst adversarial backreference pattern measured (1_315).
             backtrack_limit: 20_000,
             // ~15x the worst adversarial fuzzy pattern measured (3_698).
             max_fuzzy_steps: 50_000,
+            // ~15x the worst adversarial subpattern shape measured (329).
+            max_structural_steps: 5_000,
             // The cap protects the DOM from a pattern like `*` matching the
             // whole list.
             max_results: 5_000,

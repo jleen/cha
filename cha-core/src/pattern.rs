@@ -18,6 +18,61 @@ fn is_punct_byte(b: u8) -> bool {
     matches!(b, b' ' | b'-' | b'\'')
 }
 
+/// Find the first `c` that sits outside any `(...)` group.
+///
+/// `(...)` in a template introduces a subpattern, which is itself a whole
+/// pattern — so the `;` in `(;oif)(;bel)` belongs to the subpattern, not to the
+/// enclosing one, and a plain `find(';')` would split the pattern in the wrong
+/// place. On paren-free input this is exactly `str::find`, which is what every
+/// pattern written before subpatterns existed relies on.
+///
+/// Returns a byte offset. Unbalanced `)` is left alone here — the tokenizer
+/// reports it with a better message than a scan could.
+fn find_top_level(s: &str, c: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if ch == c && depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// [`find_top_level`], searching from the right.
+fn rfind_top_level(s: &str, c: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => depth = depth.saturating_sub(1),
+            _ if ch == c && depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Byte offset of the `)` closing the `(` at `open`, counting nested groups.
+fn matching_paren(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (j, &ch) in chars.iter().enumerate().skip(open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A compiled matcher. Returns `None` when the word does not match, or
 /// `Some(MatchInfo)` when it does — the `MatchInfo` carries optional extra detail
 /// about the match (e.g. unused pool letters) and is empty for matches that have
@@ -84,6 +139,11 @@ pub fn compile_pattern_checked_with(
             limits.max_pattern_len
         )));
     }
+    // `&` and `!` are whole-query operators, and the split below is textual, so
+    // neither can be allowed inside a subpattern: `(a&b)` would otherwise be
+    // torn into two parts and surface as a baffling "Unclosed '('". Rejecting
+    // them here buys a message that says what is actually wrong.
+    reject_operators_in_subpattern(pattern_str)?;
     let parts: Vec<&str> = pattern_str.split('&').collect();
     let mut matchers: Vec<(bool, Matcher)> = Vec::new();
     let mut contentless = false;
@@ -149,6 +209,29 @@ pub fn compile_pattern_checked_with(
     })
 }
 
+/// Reject `&` or `!` occurring inside a `(...)` subpattern.
+///
+/// Both are top-level operators: `&` conjoins whole patterns and `!` negates
+/// one, and neither has a meaning scoped to a slice of a word. A subpattern is
+/// a pattern, but only the template/anagram half of one.
+fn reject_operators_in_subpattern(pattern_str: &str) -> Result<(), PatternError> {
+    let mut depth = 0usize;
+    for ch in pattern_str.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '&' | '!' if depth > 0 => {
+                return Err(PatternError(format!(
+                    "'{}' cannot appear inside a subpattern '(...)'",
+                    ch
+                )))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn compile_pattern(pattern_str: &str) -> Result<Matcher, PatternError> {
     compile_pattern_checked(pattern_str).map(|c| c.matcher)
 }
@@ -164,7 +247,14 @@ pub fn compile_pattern_with(pattern_str: &str, limits: &Limits) -> Result<Matche
 /// classes `[…]`, and sub-patterns `(…)` count as content, so only genuinely empty
 /// parts are flagged.
 fn compile_one_pattern(pattern: &str, limits: &Limits) -> Result<(Matcher, bool), PatternError> {
-    if let Some(idx) = pattern.find(';') {
+    // Dispatch is resolved once, here, and baked into the returned closure. The
+    // structural engine is entered only by syntax that could not compile before
+    // it existed, so every pattern written against the older language takes
+    // byte-for-byte the path it always took.
+    if needs_structural(pattern) {
+        return compile_structural(pattern, limits);
+    }
+    if let Some(idx) = find_top_level(pattern, ';') {
         if idx == 0 {
             // Pure anagram: contentless when the pool has no matchable tokens.
             let contentless = anagram_pool_is_empty(&pattern[1..]);
@@ -182,6 +272,22 @@ fn compile_one_pattern(pattern: &str, limits: &Limits) -> Result<(Matcher, bool)
     }
 }
 
+/// Whether this part needs the structural engine rather than one of the three
+/// older ones.
+///
+/// Two triggers, both of them syntax that was a hard error before subpatterns:
+/// a `(...)` group in the *template* half (in the pool half, `(...)` is the
+/// long-standing "contains this substring" marker and keeps that meaning), and
+/// a digit in the pool half, which is what lets a variable bound by the
+/// template be spent as a pool letter.
+fn needs_structural(pattern: &str) -> bool {
+    let (template, pool) = match find_top_level(pattern, ';') {
+        Some(idx) => (&pattern[..idx], &pattern[idx + 1..]),
+        None => (pattern, ""),
+    };
+    template.contains('(') || pool.chars().any(|c| c.is_ascii_digit())
+}
+
 /// Whether an anagram pool contains no matchable tokens — no letters, wildcards
 /// (`.`/`*`), character classes (`[`), or sub-patterns (`(`). True only for a pool
 /// that is effectively empty (i.e. a bare `;`), which matches nothing meaningful.
@@ -196,11 +302,11 @@ fn anagram_pool_is_empty(pool: &str) -> bool {
 /// `None` when there is no backtick. A backtick is otherwise meaningless, so any
 /// backtick is treated as a fuzz marker — this never collides with a valid pattern.
 fn split_fuzz(template: &str) -> Result<(&str, Option<usize>), PatternError> {
-    match template.rfind('`') {
+    match rfind_top_level(template, '`') {
         None => Ok((template, None)),
         Some(idx) => {
             let base = &template[..idx];
-            if base.contains('`') {
+            if find_top_level(base, '`').is_some() {
                 return Err(PatternError("Pattern has more than one '`'".to_string()));
             }
             let num = &template[idx + 1..];
@@ -667,19 +773,265 @@ fn cartesian_product(choices: &[Vec<char>]) -> Vec<Vec<char>> {
     result
 }
 
-fn compile_anagram(
+/// A variable environment: `env[d]` is the lowercase letter digit `d` is bound
+/// to, or 0 when it is still unbound.
+///
+/// Passed **by value** through the structural matcher, which is what lets a
+/// failed branch be abandoned without unwinding anything — ten bytes is cheaper
+/// to copy than a binding trail is to maintain.
+type Env = [u8; 10];
+
+/// The environment every pattern without digit variables matches under.
+const NO_VARS: Env = [0; 10];
+
+/// A compiled anagram pool — everything after a `;` — together with what the
+/// enclosing template already accounts for.
+///
+/// The template's contribution lives here because the acceptance rule is a
+/// statement about the two *together*: a letter the template pins is one the
+/// pool does not have to supply. Keeping them in one place is also what lets
+/// the structural engine reuse this arithmetic instead of growing a second copy
+/// that could drift.
+struct Pool {
+    /// One entry per `[...]` combination: the pre-summed counter and its letter
+    /// count. Built once at compile time; the per-word path never touches a
+    /// `Vec` or a `HashMap` for pool accounting.
+    combo_pools: Vec<([usize; 26], usize)>,
+    /// `.` wildcards: each licenses exactly one letter outside the pool.
+    num_wildcards: usize,
+    /// `*`: disables the length and surplus equalities entirely.
+    has_star: bool,
+    /// `(...)` groups: literal substrings the candidate must contain. Combo-
+    /// independent, so checked once rather than per combination.
+    contains: Vec<String>,
+    /// Digit variables spent as pool letters, resolved against an [`Env`] at
+    /// match time. Empty for every pattern that has no subpatterns.
+    vars: Vec<u8>,
+    /// Letters the enclosing template accounts for; see
+    /// [`template_literal_letters`]. All zero for a pure anagram.
+    template_counter: [usize; 26],
+    /// True when there is no template at all (a bare `;pool`).
+    is_pure: bool,
+}
+
+impl Pool {
+    /// Whether the pool has anything matchable in it at all.
+    fn has_content(&self) -> bool {
+        self.has_star
+            || self.num_wildcards > 0
+            || !self.vars.is_empty()
+            || self.combo_pools.iter().any(|(_, size)| *size > 0)
+    }
+
+    /// The fewest letters this pool can spend. Every `[...]` combination has
+    /// the same size, so the first one speaks for all of them; an empty
+    /// `combo_pools` (a `[]` group, which matches nothing) reports 0, which is
+    /// a loose but valid bound.
+    fn min_spend(&self) -> usize {
+        let base = self.combo_pools.first().map_or(0, |(_, size)| *size);
+        base + self.num_wildcards + self.vars.len()
+    }
+
+    /// The exact number of letters this pool spends, or `None` when a `*` makes
+    /// it open-ended.
+    fn spend(&self) -> Option<usize> {
+        (!self.has_star).then(|| self.min_spend())
+    }
+
+    /// Test one `[...]` combination. `None` means "try the next one"; `Some`
+    /// means the candidate matched, and carries the letters left over on each
+    /// side.
+    fn check_combo(
+        &self,
+        pool_counter: &[usize; 26],
+        pool_base: usize,
+        candidate_counter: &[usize; 26],
+        candidate_len: usize,
+    ) -> Option<MatchInfo> {
+        let pool_size = pool_base + self.num_wildcards;
+
+        if self.is_pure && !self.has_star && candidate_len != pool_size {
+            return None;
+        }
+
+        // The "effective pool" is the set of letters the word is measured against
+        // when reporting unused (pool − word) and extra (word − pool) letters.
+        let effective_pool: [usize; 26] = if self.is_pure {
+            for i in 0..26 {
+                if pool_counter[i] > 0 && candidate_counter[i] < pool_counter[i] {
+                    return None;
+                }
+            }
+
+            let extras: usize = (0..26)
+                .map(|i| candidate_counter[i].saturating_sub(pool_counter[i]))
+                .sum();
+
+            if !self.has_star && extras != self.num_wildcards {
+                return None;
+            }
+
+            *pool_counter
+        } else {
+            // Hybrid: full_counter[x] = max(template_count[x], pool_count[x])
+            // This models template letters being implicitly in the anagram pool.
+            // Note that a star wildcard in the anagram pool means nothing in this case.
+            // (The only thing it *could* mean is "ignore the anagram and do what you like",
+            // which isn't very interesting.)
+            let mut anagram_counter = self.template_counter;
+            for i in 0..26 {
+                if pool_counter[i] > anagram_counter[i] {
+                    anagram_counter[i] = pool_counter[i];
+                }
+            }
+
+            // Count letters in the candidate that aren't in the anagram pool, and
+            // pool letters not used by the candidate.
+            let mut extra_count: usize = 0;
+            let mut unused_count: usize = 0;
+            for i in 0..26 {
+                extra_count += candidate_counter[i].saturating_sub(anagram_counter[i]);
+                unused_count += anagram_counter[i].saturating_sub(candidate_counter[i]);
+            }
+
+            // The candidate has to use all the pool letters (a longer word)
+            // or it has to use *only* pool letters (a shorter word).
+            // Wildcards license a deviation from either criterion.
+            // Wildcards consume pattern symbols without actually adding license,
+            // until all wildcards are consumed, at which point they license non-pool letters.
+            if extra_count > self.num_wildcards
+                && unused_count > self.num_wildcards.saturating_sub(candidate_len)
+            {
+                return None;
+            }
+
+            anagram_counter
+        };
+
+        // Match confirmed. Now (and only now) do the extra work of spelling out the
+        // unused (pool − word) and extra (word − pool) letters for display.
+        Some(MatchInfo {
+            unused: diff_letters(&effective_pool, candidate_counter),
+            extra: diff_letters(candidate_counter, &effective_pool),
+        })
+    }
+
+    /// Test a candidate against every `[...]` combination, under `env`.
+    fn check(&self, candidate: &str, env: &Env) -> Option<MatchInfo> {
+        let (candidate_counter, candidate_len, has_other) = count_str(candidate);
+
+        // A pure anagram rearranges letters, so a candidate carrying any non-letter
+        // character (digit, symbol, or non-ASCII letter) is not a clean anagram —
+        // reject it, mirroring the template path's ASCII `[a-z]`. The hybrid path
+        // (is_pure == false) is already governed by its anchored template regex.
+        if self.is_pure && has_other {
+            return None;
+        }
+
+        for (base_counter, base_size) in &self.combo_pools {
+            // The common case — no digit variables — hands the pre-computed
+            // counter straight through without copying it.
+            let found = if self.vars.is_empty() {
+                self.check_combo(base_counter, *base_size, &candidate_counter, candidate_len)
+            } else {
+                let mut adjusted = *base_counter;
+                for &d in &self.vars {
+                    let b = env[d as usize];
+                    if b == 0 {
+                        // Unbound. `check_variable_binding` rules this out at
+                        // compile time; degrading to "no match" keeps the hot
+                        // path `Result`-free if it ever slipped through.
+                        return None;
+                    }
+                    adjusted[(b - b'a') as usize] += 1;
+                }
+                self.check_combo(
+                    &adjusted,
+                    base_size + self.vars.len(),
+                    &candidate_counter,
+                    candidate_len,
+                )
+            };
+            if found.is_some() {
+                // `(...)` groups are combo-independent, so this one test decides
+                // for every combination at once: reaching it means some combo
+                // passed, and failing it means none could have. Its *placement*
+                // is load-bearing — `contains` is a substring search, and down
+                // here it runs on the handful of words that already passed the
+                // pool arithmetic rather than on all 83k. Hoisting it above the
+                // loop, where it reads more naturally, cost 36% on
+                // `;(che)rostra`.
+                if !self
+                    .contains
+                    .iter()
+                    .all(|sp| candidate.contains(sp.as_str()))
+                {
+                    return None;
+                }
+                return found;
+            }
+        }
+
+        None
+    }
+}
+
+/// The letters a template accounts for, and therefore the letters an anagram
+/// pool does not have to supply — the "absorption" set folded in by
+/// [`Pool::check_combo`]'s hybrid arm.
+///
+/// **A letter absorbs iff it occurs in a template position — before a `;` — at
+/// any nesting depth. A letter in any pool, at any depth, never absorbs.** That
+/// rule is what makes `(;oif)(;bel);oifblx` fail to match *foible* while
+/// `(;oif)(;bel);oifblex` matches it: the `e` that `(;bel)` spends is the
+/// subpattern's own business, not a letter the outer pool is excused from
+/// naming. A literal is a literal wherever it sits, so the `f` of `(f..;oif)`
+/// absorbs exactly as the `c` and `t` of `c.t;ao` do.
+///
+/// Digit variables are not letters and never absorb, the same as `.`.
+fn template_literal_letters(template: &str) -> Vec<char> {
+    let mut out = Vec::new();
+    collect_template_letters(template, &mut out);
+    out
+}
+
+fn collect_template_letters(template: &str, out: &mut Vec<char>) {
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '(' => {
+                // Unclosed: leave it. The tokenizer reports it with a better
+                // message than a letter scan could.
+                let Some(j) = matching_paren(&chars, i) else {
+                    return;
+                };
+                let inner: String = chars[i + 1..j].iter().collect();
+                let tpl = match find_top_level(&inner, ';') {
+                    Some(k) => &inner[..k],
+                    None => &inner[..],
+                };
+                collect_template_letters(tpl, out);
+                i = j;
+            }
+            c if c.is_alphabetic() => out.push(c.to_lowercase().next().unwrap()),
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Compile the text after a `;` into a [`Pool`], against the template (if any)
+/// that shares the pattern with it.
+fn parse_pool(
     template: Option<&str>,
     anagram_expr: &str,
     limits: &Limits,
-) -> Result<Matcher, PatternError> {
-    if template.is_some_and(|t| t.contains('`')) {
-        return Err(PatternError(
-            "Fuzzy matching ('`N') is not supported in an anagram template".to_string(),
-        ));
-    }
+) -> Result<Pool, PatternError> {
     let mut fixed_letters: Vec<char> = Vec::new();
     let mut choices: Vec<Vec<char>> = Vec::new();
-    let mut sub_patterns: Vec<String> = Vec::new();
+    let mut contains: Vec<String> = Vec::new();
+    let mut vars: Vec<u8> = Vec::new();
     let mut num_wildcards: usize = 0;
     let mut has_star = false;
 
@@ -703,12 +1055,16 @@ fn compile_anagram(
                     .ok_or_else(|| PatternError("Unclosed '(' in anagram".to_string()))?;
                 let j = i + rel;
                 let sp: String = chars[i + 1..j].iter().collect::<String>().to_lowercase();
-                sub_patterns.push(sp.clone());
+                contains.push(sp.clone());
                 fixed_letters.extend(sp.chars());
                 i = j;
             }
             '.' => num_wildcards += 1,
             '*' => has_star = true,
+            // A digit spends whatever letter the template bound it to. Which
+            // letter that is isn't known until match time, so it is recorded as
+            // a slot rather than folded into `fixed_letters`.
+            c if c.is_ascii_digit() => vars.push(c as u8 - b'0'),
             c if c.is_alphabetic() => {
                 fixed_letters.push(c.to_lowercase().next().unwrap());
             }
@@ -748,21 +1104,10 @@ fn compile_anagram(
         cartesian_product(&choices)
     };
 
-    let template_matcher: Option<Matcher> =
-        template.map(|t| compile_template(t, limits)).transpose()?;
-    let is_pure = template.is_none();
-    let template_letters: Vec<char> = template
-        .map(|t| {
-            t.chars()
-                .filter(|c| c.is_alphabetic())
-                .map(|c| c.to_lowercase().next().unwrap())
-                .collect()
-        })
-        .unwrap_or_default();
+    let template_letters: Vec<char> = template.map(template_literal_letters).unwrap_or_default();
 
     let fixed_counter = count_chars(&fixed_letters);
     let fixed_size = fixed_letters.len();
-    let template_counter = count_chars(&template_letters);
     let combo_pools: Vec<([usize; 26], usize)> = choice_combos
         .iter()
         .map(|combo| {
@@ -774,98 +1119,43 @@ fn compile_anagram(
         })
         .collect();
 
+    Ok(Pool {
+        combo_pools,
+        num_wildcards,
+        has_star,
+        contains,
+        vars,
+        template_counter: count_chars(&template_letters),
+        is_pure: template.is_none(),
+    })
+}
+
+fn compile_anagram(
+    template: Option<&str>,
+    anagram_expr: &str,
+    limits: &Limits,
+) -> Result<Matcher, PatternError> {
+    if template.is_some_and(|t| t.contains('`')) {
+        return Err(PatternError(
+            "Fuzzy matching ('`N') is not supported in an anagram template".to_string(),
+        ));
+    }
+    let pool = parse_pool(template, anagram_expr, limits)?;
+    // A digit in the pool is one of `needs_structural`'s two triggers, so a part
+    // carrying one never reaches this engine — only the structural one can
+    // thread the environment a pool variable is resolved against.
+    debug_assert!(
+        pool.vars.is_empty(),
+        "a pool variable should have routed to the structural engine"
+    );
+    let template_matcher: Option<Matcher> =
+        template.map(|t| compile_template(t, limits)).transpose()?;
+
     Ok(Box::new(move |candidate: &str| {
         if let Some(ref tm) = template_matcher {
             tm(candidate)?;
         }
-
-        let (candidate_counter, candidate_len, has_other) = count_str(candidate);
-
-        // A pure anagram rearranges letters, so a candidate carrying any non-letter
-        // character (digit, symbol, or non-ASCII letter) is not a clean anagram —
-        // reject it, mirroring the template path's ASCII `[a-z]`. The hybrid path
-        // (is_pure == false) is already governed by its anchored template regex.
-        if is_pure && has_other {
-            return None;
-        }
-
-        'combo: for (pool_counter, pool_base) in &combo_pools {
-            let pool_size = pool_base + num_wildcards;
-
-            if is_pure && !has_star && candidate_len != pool_size {
-                continue;
-            }
-
-            // The "effective pool" is the set of letters the word is measured against
-            // when reporting unused (pool − word) and extra (word − pool) letters.
-            let effective_pool: [usize; 26] = if is_pure {
-                for i in 0..26 {
-                    if pool_counter[i] > 0 && candidate_counter[i] < pool_counter[i] {
-                        continue 'combo;
-                    }
-                }
-
-                let extras: usize = (0..26)
-                    .map(|i| candidate_counter[i].saturating_sub(pool_counter[i]))
-                    .sum();
-
-                if !has_star && extras != num_wildcards {
-                    continue;
-                }
-
-                *pool_counter
-            } else {
-                // Hybrid: full_counter[x] = max(template_count[x], pool_count[x])
-                // This models template letters being implicitly in the anagram pool.
-                // Note that a star wildcard in the anagram pool means nothing in this case.
-                // (The only thing it *could* mean is "ignore the anagram and do what you like",
-                // which isn't very interesting.)
-                let mut anagram_counter = template_counter;
-                for i in 0..26 {
-                    if pool_counter[i] > anagram_counter[i] {
-                        anagram_counter[i] = pool_counter[i];
-                    }
-                }
-
-                // Count letters in the candidate that aren't in the anagram pool, and
-                // pool letters not used by the candidate.
-                let mut extra_count: usize = 0;
-                let mut unused_count: usize = 0;
-                for i in 0..26 {
-                    extra_count += candidate_counter[i].saturating_sub(anagram_counter[i]);
-                    unused_count += anagram_counter[i].saturating_sub(candidate_counter[i]);
-                }
-
-                // The candidate has to use all the pool letters (a longer word)
-                // or it has to use *only* pool letters (a shorter word).
-                // Wildcards license a deviation from either criterion.
-                // Wildcards consume pattern symbols without actually adding license,
-                // until all wildcards are consumed, at which point they license non-pool letters.
-                if extra_count > num_wildcards
-                    && unused_count > num_wildcards.saturating_sub(candidate_len)
-                {
-                    continue;
-                }
-
-                anagram_counter
-            };
-
-            if !sub_patterns
-                .iter()
-                .all(|sp| candidate.contains(sp.as_str()))
-            {
-                continue;
-            }
-
-            // Match confirmed. Now (and only now) do the extra work of spelling out the
-            // unused (pool − word) and extra (word − pool) letters for display.
-            return Some(MatchInfo {
-                unused: diff_letters(&effective_pool, &candidate_counter),
-                extra: diff_letters(&candidate_counter, &effective_pool),
-            });
-        }
-
-        None
+        pool.check(candidate, &NO_VARS)
     }))
 }
 
@@ -879,6 +1169,474 @@ fn diff_letters(more: &[usize; 26], less: &[usize; 26]) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// The structural engine: subpatterns, and variables that cross them.
+//
+// The fourth matching engine, after the regex template path, the fuzzy
+// tokenizer and the anagram pool. It exists because a subpattern is not a
+// regular constraint: `(;oif)(;bel)` asks for the word to be *cut* into pieces
+// and each piece handed to a whole sub-pattern, and an anagram over a piece is
+// not something a DFA or a backreference can express.
+//
+// It is entered only by syntax that was a hard error before it existed (see
+// `needs_structural`), so nothing written against the older language can be
+// rerouted here.
+//
+// Two properties keep it cheap. Every element's length is bounded at compile
+// time, so when they are all fixed — which covers essentially every pattern a
+// person writes — the cut points are forced and there is no search at all, just
+// a walk. And the whole engine is ASCII-only, like the fuzzy one: with an
+// ASCII-only pattern no token can consume a non-ASCII byte, so byte offsets are
+// char offsets, every slice it takes is on a char boundary, and the length
+// early-out is exact.
+// ---------------------------------------------------------------------------
+
+/// One position in a subpattern-bearing template.
+///
+/// The same vocabulary as [`FuzzTok`] (which stays untouched — the two engines
+/// have different jobs) plus the two things that are new here: a variable, and
+/// a nested sub-pattern.
+enum Tok {
+    /// A literal letter (lowercased).
+    Lit(u8),
+    /// Punctuation (`-`, `'`, space).
+    Punct(u8),
+    /// `.` — any letter.
+    Any,
+    /// `@` — a vowel.
+    Vowel,
+    /// `#` — a consonant.
+    Consonant,
+    /// `[abc]` — one letter from the set (lowercased bytes).
+    Class(Vec<u8>),
+    /// `*` — zero or more letters.
+    Star,
+    /// A digit variable. Binds the letter at this position on first use, and
+    /// requires equality afterwards — across subpattern boundaries, which is
+    /// what a single regex could not do.
+    Var(u8),
+    /// `(t;p)` — a whole pattern applied to a contiguous slice.
+    Sub(Box<Node>),
+}
+
+/// A compiled `template;pool`, at any nesting depth.
+struct Node {
+    toks: Vec<Tok>,
+    pool: Option<Pool>,
+    /// True when there is no template half at all (`(;oif)`), so the token list
+    /// imposes nothing and the pool alone fixes the length.
+    pure: bool,
+    /// Byte length this node can match. `max` is `None` when a `*` makes it
+    /// open-ended.
+    min: usize,
+    max: Option<usize>,
+    /// `suffix_min[i]`/`suffix_max[i]`: what the tokens from `i` onward need.
+    /// Indexed up to and including `toks.len()`, so the walker can prune before
+    /// looking at a token as well as after the last one.
+    suffix_min: Vec<usize>,
+    suffix_max: Vec<Option<usize>>,
+}
+
+impl Node {
+    /// Whether there is anything matchable in here at all. An empty group like
+    /// `()` is contentless in the same sense a bare `;` is.
+    fn has_content(&self) -> bool {
+        self.toks.iter().any(|t| match t {
+            Tok::Sub(sub) => sub.has_content(),
+            _ => true,
+        }) || self.pool.as_ref().is_some_and(|p| p.has_content())
+    }
+}
+
+/// Byte length one token can cover.
+fn tok_bounds(t: &Tok) -> (usize, Option<usize>) {
+    match t {
+        Tok::Star => (0, None),
+        Tok::Sub(n) => (n.min, n.max),
+        _ => (1, Some(1)),
+    }
+}
+
+/// Deepest `(...)` nesting in `pattern`.
+///
+/// Checked once, up front, so every recursion below it — tokenizing, letter
+/// collection, compiling a node — is bounded without each having to carry a
+/// depth counter. Applies to *all* parens, including the ones that get spliced
+/// away for having no `;`: they cost the same compile-time recursion.
+fn check_nesting_depth(pattern: &str, limits: &Limits) -> Result<(), PatternError> {
+    let mut depth = 0usize;
+    let mut deepest = 0usize;
+    for ch in pattern.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if deepest > limits.max_subpattern_depth {
+        return Err(PatternError(format!(
+            "Subpatterns are nested {} deep; the limit is {}",
+            deepest, limits.max_subpattern_depth
+        )));
+    }
+    Ok(())
+}
+
+/// Tokenize the template half of a subpattern-bearing pattern.
+fn tokenize_structural(template: &str, limits: &Limits) -> Result<Vec<Tok>, PatternError> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '.' => out.push(Tok::Any),
+            '*' => {
+                // The run normalizes to its dots followed by one star, exactly
+                // as on the other two engines; see `collapse_gap_run`. A `(`
+                // ends the run, so this never reaches across a subpattern.
+                let dots = collapse_gap_run(&chars, &mut i);
+                for _ in 0..dots {
+                    out.push(Tok::Any);
+                }
+                out.push(Tok::Star);
+            }
+            '@' => out.push(Tok::Vowel),
+            '#' => out.push(Tok::Consonant),
+            '[' => {
+                let rel = chars[i..]
+                    .iter()
+                    .position(|&x| x == ']')
+                    .ok_or_else(|| PatternError("Unclosed '[' in template".to_string()))?;
+                let j = i + rel;
+                let mut set = Vec::new();
+                for &ch in &chars[i + 1..j] {
+                    if !ch.is_ascii() {
+                        return Err(PatternError(NON_ASCII_SUBPATTERN.to_string()));
+                    }
+                    set.push(ch.to_ascii_lowercase() as u8);
+                }
+                out.push(Tok::Class(set));
+                i = j;
+            }
+            '(' => {
+                let j = matching_paren(&chars, i)
+                    .ok_or_else(|| PatternError("Unclosed '(' in template".to_string()))?;
+                let inner: String = chars[i + 1..j].iter().collect();
+                if find_top_level(&inner, ';').is_none() {
+                    // No anagram inside, so the parens constrain nothing that
+                    // the same text without them wouldn't: splice it in. This
+                    // is what keeps `f(oo)bar` exactly as cheap as `foobar`,
+                    // and it still finds a nested `(a(;bc)d)`.
+                    out.extend(tokenize_structural(&inner, limits)?);
+                } else {
+                    out.push(Tok::Sub(Box::new(compile_node(&inner, limits)?)));
+                }
+                i = j;
+            }
+            ')' => return Err(PatternError("Unmatched ')' in template".to_string())),
+            '`' => {
+                return Err(PatternError(
+                    "Fuzzy matching ('`N') is not supported with subpatterns".to_string(),
+                ))
+            }
+            c if c.is_ascii_digit() => out.push(Tok::Var(c as u8 - b'0')),
+            c @ ('-' | '\'' | ' ') => out.push(Tok::Punct(c as u8)),
+            c if c.is_ascii_alphabetic() => out.push(Tok::Lit(c.to_ascii_lowercase() as u8)),
+            c if c.is_alphabetic() => return Err(PatternError(NON_ASCII_SUBPATTERN.to_string())),
+            c => {
+                return Err(PatternError(format!(
+                    "Template has meaningless character '{}'",
+                    c
+                )))
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+const NON_ASCII_SUBPATTERN: &str = "Subpatterns support only ASCII letters";
+
+/// Compile one `template;pool`, recursively.
+fn compile_node(src: &str, limits: &Limits) -> Result<Node, PatternError> {
+    let (tpl, pool_src) = match find_top_level(src, ';') {
+        Some(idx) => (&src[..idx], Some(&src[idx + 1..])),
+        None => (src, None),
+    };
+    let pure = pool_src.is_some() && tpl.is_empty();
+    let toks = if pure {
+        Vec::new()
+    } else {
+        tokenize_structural(tpl, limits)?
+    };
+    let pool = pool_src
+        .map(|p| parse_pool(if pure { None } else { Some(tpl) }, p, limits))
+        .transpose()?;
+
+    // Suffix bounds, right to left. These are the whole reason a fixed-length
+    // composition costs a walk rather than a search.
+    let n = toks.len();
+    let mut suffix_min = vec![0usize; n + 1];
+    let mut suffix_max = vec![Some(0usize); n + 1];
+    for i in (0..n).rev() {
+        let (lo, hi) = tok_bounds(&toks[i]);
+        suffix_min[i] = suffix_min[i + 1] + lo;
+        suffix_max[i] = match (hi, suffix_max[i + 1]) {
+            (Some(a), Some(b)) => Some(a + b),
+            _ => None,
+        };
+    }
+
+    let (min, max) = if pure {
+        // No template, so the pool alone says how many letters this spends.
+        let pool = pool.as_ref().expect("pure implies a pool");
+        (pool.min_spend(), pool.spend())
+    } else {
+        (suffix_min[0], suffix_max[0])
+    };
+
+    Ok(Node {
+        toks,
+        pool,
+        pure,
+        min,
+        max,
+        suffix_min,
+        suffix_max,
+    })
+}
+
+/// Reject a digit variable spent in a pool that nothing binds first.
+///
+/// Bindings flow left to right through the token stream, and out of a
+/// subpattern into the ones after it, so `(1234)(;1234)` is fine and
+/// `(;1234)(1234)` is not. Deciding it here keeps the match-time path free of
+/// an "unbound variable" case it would otherwise have to carry per word.
+fn check_variable_binding(node: &Node) -> Result<(), PatternError> {
+    let mut bound = [false; 10];
+    visit_bindings(node, &mut bound)
+}
+
+fn visit_bindings(node: &Node, bound: &mut [bool; 10]) -> Result<(), PatternError> {
+    for t in &node.toks {
+        match t {
+            Tok::Var(d) => bound[*d as usize] = true,
+            Tok::Sub(sub) => visit_bindings(sub, bound)?,
+            _ => {}
+        }
+    }
+    if let Some(pool) = &node.pool {
+        for &d in &pool.vars {
+            if !bound[d as usize] {
+                return Err(PatternError(format!(
+                    "Digit variable '{}' is used in an anagram pool before anything binds it",
+                    d
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The slice `start..end` as a string, or `None` when those offsets do not fall
+/// on char boundaries.
+///
+/// On a word this engine can actually match the offsets are always boundaries
+/// (everything it consumes is ASCII), so this is a guard rather than a branch
+/// that gets taken — but it is the guard that makes byte slicing panic-free on
+/// a word list containing anything else.
+fn slice_str(w: &[u8], start: usize, end: usize) -> Option<&str> {
+    std::str::from_utf8(&w[start..end]).ok()
+}
+
+/// Match `node`'s tokens from token `ti` / byte `ci`, filling exactly up to
+/// `end`. Returns the environment as extended by this stretch, plus the detail
+/// its subpatterns reported.
+fn walk(
+    node: &Node,
+    w: &[u8],
+    ti: usize,
+    ci: usize,
+    end: usize,
+    env: Env,
+    steps: &mut u32,
+) -> Option<(Env, MatchInfo)> {
+    // Bounds the number of nodes explored, per word, re-armed for each. Both
+    // the `Star` and the `Sub` arm below branch, so without this a pattern like
+    // `*(;ab)*(;cd)*` is exponential with nothing underneath it to stop.
+    // Exhausting the budget reports "no match", as every other match-time limit
+    // in the crate does.
+    if *steps == 0 {
+        return None;
+    }
+    *steps -= 1;
+
+    // What is left has to be something the remaining tokens can cover. Applied
+    // before the token is even looked at, this is what collapses an all-fixed
+    // composition to a single forced cut.
+    let left = end - ci;
+    if left < node.suffix_min[ti] {
+        return None;
+    }
+    if node.suffix_max[ti].is_some_and(|mx| left > mx) {
+        return None;
+    }
+
+    if ti == node.toks.len() {
+        // The pruning above already proved `ci == end`.
+        return Some((env, MatchInfo::default()));
+    }
+
+    match &node.toks[ti] {
+        Tok::Star => {
+            // Match zero letters here, or consume one letter and stay on the star.
+            if let Some(r) = walk(node, w, ti + 1, ci, end, env, steps) {
+                return Some(r);
+            }
+            if ci < end && w[ci].to_ascii_lowercase().is_ascii_lowercase() {
+                walk(node, w, ti, ci + 1, end, env, steps)
+            } else {
+                None
+            }
+        }
+        Tok::Sub(sub) => {
+            // Only cuts that leave the rest of the tokens satisfiable are worth
+            // trying, so this window is usually a single offset.
+            let rest_min = node.suffix_min[ti + 1];
+            let lo = ci + sub.min;
+            // `end - rest_min` cannot underflow: the suffix_min prune above
+            // already established `end - ci >= sub.min + rest_min`.
+            let hi = sub.max.map_or(end, |m| ci + m).min(end - rest_min);
+            let mut cut = lo;
+            while cut <= hi {
+                if let Some((env2, mut info)) = match_node(sub, w, ci, cut, env, steps) {
+                    if let Some((env3, rest)) = walk(node, w, ti + 1, cut, end, env2, steps) {
+                        info.unused.push_str(&rest.unused);
+                        info.extra.push_str(&rest.extra);
+                        return Some((env3, info));
+                    }
+                }
+                cut += 1;
+            }
+            None
+        }
+        tok => {
+            if ci >= end {
+                return None;
+            }
+            let c = w[ci].to_ascii_lowercase();
+            let mut env2 = env;
+            let satisfied = match tok {
+                Tok::Lit(l) => c == *l,
+                Tok::Punct(p) => c == *p,
+                Tok::Any => c.is_ascii_lowercase(),
+                Tok::Vowel => is_vowel(c),
+                Tok::Consonant => c.is_ascii_lowercase() && !is_vowel(c),
+                Tok::Class(set) => set.contains(&c),
+                Tok::Var(d) => {
+                    let slot = &mut env2[*d as usize];
+                    if !c.is_ascii_lowercase() {
+                        false
+                    } else if *slot == 0 {
+                        *slot = c;
+                        true
+                    } else {
+                        *slot == c
+                    }
+                }
+                Tok::Star | Tok::Sub(_) => unreachable!("handled above"),
+            };
+            if satisfied {
+                walk(node, w, ti + 1, ci + 1, end, env2, steps)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Match one whole node against the slice `start..end`.
+fn match_node(
+    node: &Node,
+    w: &[u8],
+    start: usize,
+    end: usize,
+    env: Env,
+    steps: &mut u32,
+) -> Option<(Env, MatchInfo)> {
+    if *steps == 0 {
+        return None;
+    }
+    *steps -= 1;
+
+    let mut info = MatchInfo::default();
+    let mut pool_checked = false;
+
+    // A pool with no variables depends only on the slice's letter counts, so it
+    // is a cheap count-based filter and belongs *before* the walk. One that
+    // spends variables has to wait for the template to bind them.
+    if let Some(pool) = &node.pool {
+        if pool.vars.is_empty() {
+            info = pool.check(slice_str(w, start, end)?, &NO_VARS)?;
+            pool_checked = true;
+        }
+    }
+
+    let env = if node.pure {
+        env
+    } else {
+        let (env, sub) = walk(node, w, 0, start, end, env, steps)?;
+        info.unused.push_str(&sub.unused);
+        info.extra.push_str(&sub.extra);
+        env
+    };
+
+    if !pool_checked {
+        if let Some(pool) = &node.pool {
+            let detail = pool.check(slice_str(w, start, end)?, &env)?;
+            info.unused.push_str(&detail.unused);
+            info.extra.push_str(&detail.extra);
+        }
+    }
+
+    Some((env, info))
+}
+
+fn compile_structural(pattern: &str, limits: &Limits) -> Result<(Matcher, bool), PatternError> {
+    check_nesting_depth(pattern, limits)?;
+    let node = compile_node(pattern, limits)?;
+    check_variable_binding(&node)?;
+    let contentless = !node.has_content();
+
+    let min = node.min;
+    // Every token but `Star` covers exactly one byte and every sub-node carries
+    // its own bounds, so a star-free composition matches exactly one length.
+    let fixed_len = (node.max == Some(min)).then_some(min);
+    let max_steps = limits.max_structural_steps;
+
+    let matcher: Matcher = Box::new(move |word: &str| {
+        // The same length early-out the other two engines use, and for the same
+        // reason: on a large list almost every word is the wrong length, so this
+        // replaces the whole walk with an integer compare. The `is_ascii` caveat
+        // is the regex path's — a word shorter than `n` bytes can never match,
+        // and bytes only equal chars when the word is ASCII.
+        if let Some(n) = fixed_len {
+            if word.len() < n || (word.len() != n && word.is_ascii()) {
+                return None;
+            }
+        } else if word.len() < min {
+            return None;
+        }
+        // Fresh budget per word, so a pathological word can't starve later ones.
+        let mut steps = max_steps;
+        match_node(&node, word.as_bytes(), 0, word.len(), NO_VARS, &mut steps).map(|(_, info)| info)
+    });
+    Ok((matcher, contentless))
 }
 
 #[cfg(test)]
@@ -1893,5 +2651,316 @@ mod tests {
         let m = compile_pattern("*1*1").unwrap();
         assert!(m("banana").is_some());
         assert!(m("kayak").is_some());
+    }
+
+    // --- Subpatterns: `(...)` in the template half ---
+
+    #[test]
+    fn test_subpattern_adjacent_anagram_blocks() {
+        // The point of the feature: cut the word and hand each piece to a whole
+        // sub-pattern. FOIBLE is FOI + BLE, an anagram of OIF and one of BEL.
+        let m = compile_pattern("(;oif)(;bel)").unwrap();
+        assert!(m("foible").is_some());
+        // Right letters, wrong side of the cut.
+        assert!(m("belfoi").is_none());
+        // The cut is fixed at 3+3, so a longer or shorter word cannot match
+        // however its letters are arranged.
+        assert!(m("foibles").is_none());
+        assert!(m("foibl").is_none());
+    }
+
+    #[test]
+    fn test_subpattern_block_with_its_own_template() {
+        // A block is a whole pattern, so it can carry a template of its own —
+        // both the pure-wildcard form and one pinning a letter.
+        for pat in ["(...;oif)(;bel)", "(f..;oif)(;bel)"] {
+            let m = compile_pattern(pat).unwrap();
+            assert!(m("foible").is_some(), "{pat} should match foible");
+        }
+        // `o..` pins the wrong letter first: FOI starts with F.
+        assert!(compile_pattern("(o..;oif)(;bel)").unwrap()("foible").is_none());
+    }
+
+    #[test]
+    fn test_subpattern_beside_ordinary_template_tokens() {
+        // Blocks compose with everything else in a template.
+        assert!(compile_pattern("...(;bel)").unwrap()("foible").is_some());
+        assert!(compile_pattern("(;el)(;bo)w").unwrap()("elbow").is_some());
+        assert!(compile_pattern("(;el)(;bo)x").unwrap()("elbow").is_none());
+    }
+
+    #[test]
+    fn test_subpattern_open_ended_block_searches_for_the_cut() {
+        // With a star the cut point is not forced, so the matcher has to try
+        // offsets. `*(;bel)` is "ends in some arrangement of B, E, L".
+        let m = compile_pattern("*(;bel)").unwrap();
+        assert!(m("able").is_some());
+        assert!(m("foible").is_some());
+        assert!(m("belfry").is_none());
+    }
+
+    #[test]
+    fn test_subpattern_without_an_anagram_is_inlined() {
+        // Parens with no `;` constrain nothing the same text without them
+        // wouldn't, so they are spliced away rather than compiled into a block.
+        for (parens, plain) in [
+            ("ele(ph)ant", "elephant"),
+            ("(c.t)", "c.t"),
+            ("f(o)(o)d", "food"),
+            ("(1)(1)", "11"),
+        ] {
+            let a = compile_pattern(parens).unwrap();
+            let b = compile_pattern(plain).unwrap();
+            for w in ["elephant", "cat", "food", "aa", "ii", "cot", "foible"] {
+                assert_eq!(
+                    a(w).is_some(),
+                    b(w).is_some(),
+                    "{parens} and {plain} disagree on {w}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_subpattern_nesting() {
+        // A block's template can hold another block. `a(;bc)d` is A, then two
+        // letters spelling BC in some order, then D — and the outer pool then
+        // measures the whole four.
+        let m = compile_pattern("(a(;bc)d;abcd)").unwrap();
+        assert!(m("abcd").is_some());
+        assert!(m("acbd").is_some());
+        assert!(m("abdc").is_none());
+    }
+
+    #[test]
+    fn test_subpattern_reports_its_own_unused_letters() {
+        // `MatchInfo` from inside a block is folded into the aggregate, the same
+        // way the `&`-parts fold theirs. `(...;oifx)` spends O, I and F on FOI
+        // and leaves the X over.
+        let m = compile_pattern("(...;oifx)(;bel)").unwrap();
+        let info = m("foible").expect("foible should match");
+        assert_eq!(info.unused, "X");
+        assert_eq!(info.extra, "");
+    }
+
+    // --- Subpatterns and a whole-word anagram together ---
+
+    #[test]
+    fn test_subpattern_absorption_rule() {
+        // The spec, case by case, against the word FOIBLE = {b,e,f,i,l,o}.
+        //
+        // A letter absorbs — excuses the pool from naming it — iff it sits in a
+        // *template* position, before a `;`, at any depth. A letter in any pool,
+        // at any depth, never absorbs. With no wildcards the acceptance rule
+        // reduces to "the word uses only pool letters, or it uses all of them":
+        //
+        //   pattern                    pool          extra   unused  verdict
+        //   ...(;bel);oif              o i f         b l e   -       match
+        //   ...(;bel);oifb             o i f b       l e     -       match
+        //   (;oif)(;bel);oifb          o i f b       l e     -       match
+        //   (;oif)(;bel);oifblex       o i f b l e x -       x       match
+        //   (;oif)(;bel);oifblx        o i f b l x   e       x       no
+        //   (;oif)(;bel);x             x             6       x       no
+        //
+        // The last two are the ones that pin the rule down. Were the `e` that
+        // `(;bel)` spends allowed to absorb, `;oifblx` would match too.
+        for pat in [
+            "...(;bel);oif",
+            "...(;bel);oifb",
+            "(;oif)(;bel);oifb",
+            "(;oif)(;bel);oifblex",
+        ] {
+            assert!(
+                compile_pattern(pat).unwrap()("foible").is_some(),
+                "{pat} should match foible"
+            );
+        }
+        for pat in ["(;oif)(;bel);oifblx", "(;oif)(;bel);x"] {
+            assert!(
+                compile_pattern(pat).unwrap()("foible").is_none(),
+                "{pat} should not match foible"
+            );
+        }
+    }
+
+    #[test]
+    fn test_subpattern_template_literal_still_absorbs() {
+        // A literal is a literal wherever it sits: the `f` of `(f..;oif)` is in
+        // a template position, so it absorbs exactly as the `c` and `t` of
+        // `c.t;ao` do.
+        assert!(compile_pattern("(f..;oif)(;bel);oifb").unwrap()("foible").is_some());
+        // And the existing top-level behaviour it is modelled on is unchanged.
+        assert!(compile_pattern("c.t;ao").unwrap()("cat").is_some());
+    }
+
+    // --- Variables that cross a subpattern boundary ---
+
+    #[test]
+    fn test_variable_bound_in_one_block_spent_in_the_next() {
+        // A digit is one variable across the whole part, not one per regex, so
+        // `(1234)` binds four letters over REAP and `(;1234)` then requires the
+        // rest of the word to be an anagram of those same four.
+        let m = compile_pattern("(1234)(;1234)").unwrap();
+        assert!(m("reappear").is_some());
+        assert!(m("teammate").is_some());
+        // Eight letters, but the second half is not a rearrangement of the first.
+        assert!(m("elephant").is_none());
+    }
+
+    #[test]
+    fn test_variable_in_a_pool_beside_a_plain_template() {
+        // No block needed for the variable itself — the pool digit is what
+        // routes this to the structural engine.
+        let m = compile_pattern("c(1)t;1").unwrap();
+        assert!(m("cat").is_some());
+        assert!(m("cot").is_some());
+        assert!(m("cast").is_none());
+    }
+
+    #[test]
+    fn test_variable_repeats_across_blocks() {
+        // The same digit in two different blocks is the same letter, so both
+        // halves here have to be an arrangement of ABC *starting with the same
+        // letter*.
+        let m = compile_pattern("(1..;abc)(1..;abc)").unwrap();
+        assert!(m("abcacb").is_some());
+        // Right letters on both sides, but the second half starts with `c`.
+        assert!(m("abccba").is_none());
+    }
+
+    #[test]
+    fn test_pool_variable_must_be_bound_first() {
+        // Bindings flow left to right, so a pool cannot spend a variable that
+        // nothing has bound yet. Decided at compile time, which keeps the
+        // per-word path free of an "unbound" case.
+        assert!(compile_pattern("(;1234)(1234)").is_err());
+        assert!(compile_pattern(";12").is_err());
+        // Bound first is fine.
+        assert!(compile_pattern("(1234)(;1234)").is_ok());
+    }
+
+    // --- What subpatterns reject ---
+
+    #[test]
+    fn test_operators_rejected_inside_a_subpattern() {
+        // `&` and `!` are whole-query operators. Without this check the textual
+        // `&` split would tear `(a&b)` in half and report "Unclosed '('".
+        for pat in ["(a&b)", "(!ab)", "(;ab&cd)", "(x;a!b)"] {
+            assert!(compile_pattern(pat).is_err(), "{pat} should be rejected");
+        }
+        // At the top level, either side of a subpattern, they still work.
+        assert!(compile_pattern("(;oif)(;bel)&f*").unwrap()("foible").is_some());
+        assert!(compile_pattern("(;oif)(;bel)&!*s").unwrap()("foible").is_some());
+    }
+
+    #[test]
+    fn test_subpattern_syntax_errors() {
+        for pat in [
+            "(;ab",        // unclosed
+            "(;ab)`1",     // fuzz does not compose with a block
+            "(;ab)\u{e9}", // non-ASCII on this path
+            "(;ab))",      // unmatched close
+        ] {
+            assert!(compile_pattern(pat).is_err(), "{pat} should be rejected");
+        }
+    }
+
+    #[test]
+    fn test_empty_subpattern_is_contentless() {
+        // `()` and `(;)` have nothing to match, like a bare `;`: a gentle note
+        // rather than an error, because the user often sees it mid-typing.
+        for pat in ["()", "(;)"] {
+            let c = compile_pattern_checked(pat).unwrap();
+            assert!(c.note.is_some(), "{pat} should carry a note");
+            assert!((c.matcher)("cat").is_none());
+        }
+    }
+
+    #[test]
+    fn test_subpattern_rejects_non_ascii_words_without_panicking() {
+        // The engine slices by byte offset, which is only safe because nothing
+        // it matches is non-ASCII: every token demands an ASCII byte, and a pure
+        // block's pool rejects `has_other`. So a word carrying a multi-byte char
+        // has to fall out, and — the part worth a test — fall out without
+        // panicking on a slice that lands mid-character.
+        let m = compile_pattern("(;oif)(;bel)").unwrap();
+        assert!(m("f\u{f6}ible").is_none());
+        // Six *bytes*, five chars, so it clears the length early-out and reaches
+        // the walker, whose first cut at byte 3 lands inside the `\u{f6}`.
+        assert!(m("\u{f6}ible").is_none());
+        assert!(m("\u{e9}\u{e9}\u{e9}").is_none());
+        // This is not a new restriction: the regex path's `*` is `[a-z]*` and
+        // rejects the same word, so the two engines agree.
+        assert!(compile_pattern("*(;bel)").unwrap()("na\u{ef}vet\u{e9}ble").is_none());
+        assert!(compile_pattern("*ble").unwrap()("na\u{ef}vet\u{e9}ble").is_none());
+        assert!(compile_pattern("*(;bel)").unwrap()("able").is_some());
+    }
+
+    // --- Work limits on the structural path ---
+
+    #[test]
+    fn test_structural_nesting_depth_is_capped() {
+        // Compile-time: bounds the recursion a short pattern can provoke.
+        let deep = format!("{}{}{}", "(".repeat(12), ";a", ")".repeat(12));
+        assert!(compile_pattern_with(&deep, &Limits::default()).is_err());
+        let shallow = "(((;a)))";
+        assert!(compile_pattern_with(shallow, &Limits::default()).is_ok());
+    }
+
+    #[test]
+    fn test_structural_steps_cap_degrades_to_no_match() {
+        // Match-time: a starved budget loses matches rather than raising, the
+        // same way `backtrack_limit` and `max_fuzzy_steps` do.
+        let starved = Limits {
+            max_structural_steps: 1,
+            ..Limits::default()
+        };
+        let m = compile_pattern_with("*(;ing)*", &starved).unwrap();
+        assert!(m("singing").is_none());
+        // And the same pattern under the shipped defaults does find it.
+        let m = compile_pattern("*(;ing)*").unwrap();
+        assert!(m("singing").is_some());
+    }
+
+    #[test]
+    fn test_structural_patterns_unchanged_under_shipped_defaults() {
+        // The other half of the limits test: nothing in the realistic corpus is
+        // anywhere near a ceiling, so a limiter cannot have narrowed the
+        // language. `limitcal` puts the worst of these at 51 steps against a
+        // default of 5_000.
+        for (pat, word) in [
+            ("(;oif)(;bel)", "foible"),
+            ("(...;oif)(;bel)", "foible"),
+            ("(;oif)(;bel);oifb", "foible"),
+            ("(1234)(;1234)", "reappear"),
+            ("*(;bel)", "able"),
+            ("*(;ing)*", "singing"),
+            ("..(;ing)", "doing"),
+        ] {
+            assert!(
+                compile_pattern(pat).unwrap()(word).is_some(),
+                "{pat} should still match {word}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_anagram_combo_cap_still_applies_inside_a_subpattern() {
+        // The cap lives in `parse_pool`, which both engines share, so a block
+        // cannot be used to smuggle a cartesian product past it.
+        let pat = format!("(;{})", "[abcde]".repeat(8));
+        match compile_pattern_with(&pat, &tight()) {
+            Err(e) => assert!(e.0.contains("too complex"), "unexpected: {}", e.0),
+            Ok(_) => panic!("expected the combo cap to reject {pat}"),
+        }
+    }
+
+    #[test]
+    fn test_existing_syntax_never_reaches_the_structural_engine() {
+        // `(...)` after a `;` keeps its long-standing "contains this substring"
+        // meaning; only a group in the *template* half is a block.
+        let m = compile_pattern(";(che)rostra").unwrap();
+        assert!(m("orchestra").is_some());
+        assert!(m("carthorse").is_none());
     }
 }

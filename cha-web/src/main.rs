@@ -66,7 +66,8 @@ fn web_limits() -> Limits {
     Limits {
         max_pattern_len: MAX_PATTERN_LEN,
         max_anagram_combos: 4_096,
-        // Both of these are *match-time* limits, re-armed per candidate word.
+        max_subpattern_depth: 4,
+        // These three are *match-time* limits, re-armed per candidate word.
         // They sit ~3-8x above the worst adversarial pattern
         // `cha-core/examples/limitcal.rs` measures (1_315 backtrack steps,
         // 3_698 fuzzy steps) — less headroom than the interactive defaults
@@ -75,6 +76,7 @@ fn web_limits() -> Limits {
         // hostage.
         backtrack_limit: 10_000,
         max_fuzzy_steps: 10_000,
+        max_structural_steps: 10_000,
         max_results: WEB_MAX_RESULTS,
         deadline: None, // set per request; see `search`
     }

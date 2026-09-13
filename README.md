@@ -60,6 +60,7 @@ results.  Enter `^D` on an empty line to exit.
 | `-` `'` ` ` | Punctuation (see below) |
 | `1`–`9` | Same letter as other occurences of that digit|
 | `` `N `` | Allow up to *N* literal letters to vary |
+| `(…)` | A subpattern (see below) |
 
 ### Variant matching
 
@@ -100,6 +101,48 @@ letters after `;` are the pool.
 ;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
 t....;intra       # starts with T, is an anagram of INTRA
 ;(che)rostra      # anagram of CHEROST RA that contains CHE exactly
+```
+
+### Subpatterns
+
+Parentheses in the template introduce a **subpattern**: a whole pattern applied
+to a contiguous slice of the word, with the slices laid end to end covering all
+of it. The point is that a subpattern can carry an anagram of its own, so you
+can ask for a word made of anagram blocks.
+
+```
+(;oif)(;bel)        # FOI + BLE → FOIBLE
+(...;oif)(;bel)     # same, with a template on the first block
+(f..;oif)(;bel)     # …and a letter pinned in it
+(;el)(;bo)w         # blocks mix with ordinary tokens → ELBOW
+*(;bel)             # ends in some arrangement of B, E, L
+```
+
+Parentheses with no `;` inside constrain nothing, so `ele(ph)ant` is just
+`elephant`. `&` and `!` are whole-query operators and cannot appear inside a
+subpattern. `` `N `` cannot be combined with one.
+
+A digit variable is one variable across the whole pattern, so it can be bound in
+one block and spent in another — including inside an anagram pool, which is the
+one place a digit was previously meaningless:
+
+```
+(1234)(;1234)     # 4 letters, then an anagram of those same 4 → REAPPEAR
+c(1)t;1           # the pool spends whatever the template bound
+```
+
+A variable has to be bound before it is spent, reading left to right, so
+`(;1234)(1234)` is an error.
+
+When a subpattern *and* the whole pattern both have an anagram, the rule is that
+**a letter excuses the outer pool from naming it only if it sits in a template
+position — before a `;` — at any depth. A letter in any pool never does.** So
+against FOIBLE:
+
+```
+(;oif)(;bel);oifb      # matches: the word uses all of O, I, F, B
+(;oif)(;bel);oifblex   # matches: the word uses only pool letters (X spare)
+(;oif)(;bel);oifblx    # no: an E left over *and* an X unused
 ```
 
 ### Logic

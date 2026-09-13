@@ -181,11 +181,13 @@ and the reject path cannot.
   Never branch on pattern syntax per word. `has_punct`, `fixed_len`,
   `combo_pools`, `is_pure` and `collapse_gap_run` are all this pattern; syntax
   that re-inspects itself inside the closure is the likeliest way to regress.
-- **Decide which of the three engines the new syntax joins** — the regex
-  template, the fuzzy tokenizer, or the anagram pool — and if it can't join one,
-  reject it *there* at compile time rather than half-supporting it. Precedent:
-  digit variables are refused on the fuzzy path because backreferences don't
-  compose with a mismatch budget.
+- **Decide which of the four engines the new syntax joins** — the regex
+  template, the fuzzy tokenizer, the anagram pool, or the structural matcher —
+  and if it can't join one, reject it *there* at compile time rather than
+  half-supporting it. Precedent: digit variables are refused on the fuzzy path
+  because backreferences don't compose with a mismatch budget, and fuzz is
+  refused on the structural path because a per-node mismatch budget doesn't
+  compose with a split search.
 - **A new fuzzy token that consumes anything other than exactly one byte
   invalidates two arguments at once**: `toks.len()` as the exact match length,
   and the reason the fuzzy early-out needs no `is_ascii` guard. Audit both, or
@@ -201,6 +203,11 @@ and the reject path cannot.
 - **Any new combinatorial expansion needs a `Limits` ceiling checked with
   `checked_mul` before the product is built** — a compile-time blowup is
   unreachable by a deadline.
+- **New structural syntax owes the engine a length bound.** Every `Tok` and
+  every `Node` reports `(min, max)` bytes, and those bounds are the only reason a
+  composition of fixed-length elements costs a walk rather than a search. A token
+  that reports looser bounds than it needs is not wrong, just slow; one that
+  reports *tighter* bounds than it needs silently loses matches.
 - **Add the new syntax to `perf.rs`'s corpus in the same commit.** This is what
   keeps the suite honest as the language grows.
 
@@ -209,10 +216,105 @@ both distinctly: a per-word branch on pattern syntax appears as a uniform
 slowdown across a whole tier, while a broken length early-out appears on exactly
 the patterns whose `fixed_len` is `Some` and nowhere else.
 
+## Subpatterns: the structural engine
+
+`(...)` in the *template* half is a **subpattern**: a whole pattern applied to a
+contiguous slice of the word, with the slices laid end to end covering all of it.
+In the *pool* half `(...)` keeps its long-standing "contains this substring"
+meaning; the two never collide, because they sit on opposite sides of the `;`.
+
+This needed a fourth engine because a subpattern is not a regular constraint.
+`(;oif)(;bel)` asks for the word to be *cut* and each piece handed to a
+sub-pattern, and an anagram over a piece is not something a DFA or a
+backreference can express. `compile_structural` compiles the part to a tree of
+`Node { toks, pool }` and `walk`/`match_node` match it.
+
+**Entry is gated on syntax that used to be a hard error**, so nothing written
+against the older language can be rerouted here: `needs_structural` requires a
+`(` in the template half, or a digit in the pool half. Everything else reaches
+exactly the engine it always did — which is what the `template`, `backref`,
+`fuzzy`, `anagram` and `hybrid` tiers of `perf.rs` are there to confirm.
+
+Three properties make it cheap:
+
+- **Every element's length is bounded at compile time.** Each `Tok` reports
+  `(min, max)` bytes, `suffix_min`/`suffix_max` accumulate those right to left,
+  and `walk` prunes on them *before* looking at a token. When every element is
+  fixed-length — essentially every pattern a person writes — the cut points are
+  forced and there is no search, just a walk. `(;oif)(;bel)` costs 1.10 ms,
+  indistinguishable from the bare `.....` template.
+- **The same bounds give the top-level length early-out.** A star-free
+  composition matches exactly one length, so the usual integer compare rejects
+  most of the list before the walker runs at all.
+- **A group with no `;` is spliced away, not compiled into a block.** The parens
+  in `ele(ph)ant` constrain nothing that `elephant` doesn't, so they cost
+  nothing. Nested groups inside a spliced one are still found.
+
+**The engine is ASCII-only**, like the fuzzy one, and that is load-bearing rather
+than incidental: with an ASCII-only pattern no token can consume a non-ASCII
+byte, so byte offsets are char offsets, every slice it takes is on a char
+boundary, and the length early-out is exact. This costs nothing in practice — the
+regex path's `*` is `[a-z]*` and rejects the same words. `slice_str` still checks
+`from_utf8`, so a cut landing mid-character is a non-match rather than a panic.
+
+### Absorption: which letters excuse the outer pool
+
+When a subpattern *and* the whole pattern both carry an anagram, the rule is:
+
+> **A letter absorbs iff it occurs in a template position — before a `;` — at any
+> nesting depth. A letter in any pool, at any depth, never absorbs.**
+
+`template_literal_letters` implements it, and the arithmetic it feeds
+(`Pool::check_combo`'s hybrid arm) is unchanged from before subpatterns existed.
+Against FOIBLE, with no wildcards, the acceptance rule reduces to *the word uses
+only pool letters, or it uses all of them*:
+
+| pattern | pool | extra (word−pool) | unused (pool−word) | |
+|---|---|---|---|---|
+| `...(;bel);oif` | `o i f` | `b l e` | — | match |
+| `(;oif)(;bel);oifb` | `o i f b` | `l e` | — | match |
+| `(;oif)(;bel);oifblex` | `o i f b l e x` | — | `x` | match |
+| `(;oif)(;bel);oifblx` | `o i f b l x` | `e` | `x` | **no** |
+| `(;oif)(;bel);x` | `x` | 6 letters | `x` | **no** |
+
+The last two are what pin the rule down: were the `e` that `(;bel)` spends
+allowed to absorb, `;oifblx` would match too. A literal is still a literal
+wherever it sits, so the `f` of `(f..;oif)` absorbs exactly as the `c` and `t` of
+`c.t;ao` do. Digit variables are not letters and never absorb, the same as `.`.
+
+### Variables across a cut
+
+A digit is one variable across the whole part, not one per regex. `walk` threads
+an `Env` (`[u8; 10]`, 0 = unbound) left to right and **by value**, so a failed
+branch is abandoned without unwinding a binding trail. That is what lets
+`(1234)(;1234)` bind four letters over REAP and then require the rest of the word
+to be an anagram of those same four — matching REAPPEAR.
+
+It also makes a digit meaningful *inside* a pool, where it was previously
+`"Anagram has meaningless character"`. `Pool::vars` records the slots, and
+`Pool::check` folds the bound letters into a copy of the combo counter — only
+when `vars` is non-empty, so the var-free path still hands the pre-computed
+counter straight through.
+
+**Bind-before-use is decided at compile time** by `check_variable_binding`,
+walking the tree in the same left-to-right order the matcher does. That keeps the
+per-word path free of an "unbound variable" case it would otherwise carry
+forever.
+
+### What it deliberately refuses
+
+- **Fuzz (`` `N ``) anywhere in a part containing a subpattern.** A per-node
+  mismatch budget composing with a split search and a variable environment is a
+  design question of its own; erroring is honest and can be lifted later.
+- **`&` and `!` inside `(...)`.** Both are whole-query operators, and the `&`
+  split is textual — without the check in `reject_operators_in_subpattern`,
+  `(a&b)` would be torn in half and surface as a baffling `"Unclosed '('"`.
+- **Non-ASCII pattern characters**, per the ASCII argument above.
+
 ## Every backtracking path needs a bound (`Limits`)
 
 Pattern input is untrusted — even from a local user, a plausible-looking pattern
-could hang or OOM the app. There are **three** superlinear paths in `pattern.rs`,
+could hang or OOM the app. There are **four** superlinear paths in `pattern.rs`,
 all bounded by [`Limits`](../cha-core/src/limits.rs), whose `Default` is generous
 enough that no hand-typed pattern reaches it. `compile_pattern`/
 `compile_pattern_checked` use the defaults; `compile_pattern_with`/
@@ -220,7 +322,7 @@ enough that no hand-typed pattern reaches it. `compile_pattern`/
 tighter ones.
 
 **One struct, split by phase — not by module.** `Limits` lives in its own module
-and carries all six ceilings, including the two the *scan* consults
+and carries all eight ceilings, including the two the *scan* consults
 (`max_results`, `deadline`). It was previously two nested structs, `CompileLimits`
 inside `SearchLimits`, which implied a compile/scan split that the fields do not
 actually follow: `backtrack_limit` and `max_fuzzy_steps` sat in `CompileLimits`
@@ -257,6 +359,20 @@ fields, which is cheaper than making every caller build a nested struct.
   *fuzz allowance*, a different quantity — don't overload it. Depth was never the
   exposure either; the `Star` arm branches twice per node, and it is the node
   count that was unbounded.
+- **`max_structural_steps` — match-time, per word.** Bounds `walk`/`match_node`
+  on the subpattern path, where two sources of branching are layered: the `Star`
+  arm recurses twice per node, and the `Sub` arm tries every cut offset its
+  length bounds allow. Those bounds are what keep it cheap — a composition whose
+  elements all have a fixed length never branches at all, so this binds only on
+  shapes like `*(12)*(;12)*(;12)*`. The variable environment is passed **by
+  value** (ten bytes), so abandoning a branch costs nothing and there is no
+  binding trail to unwind; depth is bounded by tokens + word length, as on the
+  fuzzy path. It is the node count, and only the node count, that needed a cap.
+- **`max_subpattern_depth` — compile-time.** Caps `(...)` nesting, and so the
+  depth of `compile_node`'s recursion. Checked once by `check_nesting_depth`
+  before anything recurses, which is why the recursive compile helpers can skip
+  carrying a depth counter. It counts *all* parens, including the ones with no
+  `;` that get spliced away — they cost the same compile-time recursion.
 - **`max_results` and `deadline` — scan-time, and both effectively free.**
   `max_results` is one integer compare per *match* (not per word), on a path
   already allocating a `MatchRow`; it removes work rather than adding it.
@@ -277,7 +393,10 @@ the difference being codegen noise. Don't "optimize" either one away.
 smallest limit that still returns every match an unlimited one finds (both limits
 are monotone, so this is well-defined). Realistic patterns need very little — the
 worst are `*1*1` at 193 steps and `` *a*e*`1 `` at 396 — and a deliberately
-adversarial tier tops out at 1_315 and 3_698. The defaults are ~15x that
+adversarial tier tops out at 1_315 and 3_698. `max_structural_steps` is
+calibrated the same way and on the same scale: realistic subpattern shapes top
+out at 51 steps (`*(;ing)*`) and the adversarial tier at 329
+(`*(12)*(;12)*(;12)*`), against a default of 5_000. The defaults are ~15x that
 adversarial worst case. They were **1_000_000 apiece**, which bounded nothing
 useful: `` **********cat`1 `` took **66 s** for one scan under that ceiling while
 finding all of its real matches within 57 steps. Cost is linear in the limit, so

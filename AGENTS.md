@@ -152,7 +152,7 @@ string shown in the UI.
 ## Every backtracking path needs a bound (`Limits`)
 
 Pattern input is untrusted — even from a local user, a plausible-looking pattern
-could hang or OOM the app. There are **three** superlinear paths in `pattern.rs`,
+could hang or OOM the app. There are **four** superlinear paths in `pattern.rs`,
 all bounded by [`Limits`](cha-core/src/limits.rs). Do not add a backtracking or
 combinatorial path without a ceiling there.
 
@@ -162,12 +162,13 @@ combinatorial path without a ceiling there.
   timeout **cannot** catch it — the check must stay where it is, before the
   product is built, and must use `checked_mul` (a wrapped value slips under the
   cap).
-- **`backtrack_limit` and `max_fuzzy_steps` bind per candidate word**;
-  `max_results` and `deadline` bind during the scan. Enforcing any of them costs
+- **`backtrack_limit`, `max_fuzzy_steps` and `max_structural_steps` bind per
+  candidate word**; `max_results` and `deadline` bind during the scan.
+  `max_subpattern_depth` binds at compile time. Enforcing any of them costs
   nothing measurable — don't "optimize" them away.
 - **The match-time defaults are calibrated, not guessed.** Re-run
-  [`limitcal`](cha-core/examples/limitcal.rs) before changing either number, and
-  read [docs/core.md](docs/core.md) first.
+  [`limitcal`](cha-core/examples/limitcal.rs) before changing any of the three,
+  and read [docs/core.md](docs/core.md) first.
 
 Exceeding a *match-time* limit degrades to "no match", which is what keeps the
 hot path `Result`-free. Exceeding the *compile-time* limit is a normal

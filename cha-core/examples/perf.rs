@@ -30,7 +30,7 @@
 //! container marker whether it is a quiet 28-core desktop or not. The banner
 //! reports what it can; the probe and the re-measurement decide.
 //!
-//! Both match-time limits are overridable via `CHA_BENCH_*` for pricing a
+//! All three match-time limits are overridable via `CHA_BENCH_*` for pricing a
 //! candidate `Limits` default, but they default to the shipped values so a plain
 //! run reports what the product actually does.
 
@@ -98,7 +98,8 @@ Usage: cargo run --release -p cha-core --example perf -- [OPTIONS]
   -h, --help         this
 
 Environment (defaults are the shipped Limits::interactive values):
-  CHA_BENCH_BACKTRACK, CHA_BENCH_FUZZY, CHA_BENCH_MAX_RESULTS, CHA_BENCH_DEADLINE
+  CHA_BENCH_BACKTRACK, CHA_BENCH_FUZZY, CHA_BENCH_STRUCTURAL,
+  CHA_BENCH_MAX_RESULTS, CHA_BENCH_DEADLINE
 
 Exit status: 0 ok, 1 usage or setup error, 2 timing regression, 3 match counts moved.";
 
@@ -159,6 +160,17 @@ const CORPUS: &[Probe] = &[
     // first, then does the extra/unused licence arithmetic.
     Probe { tier: "hybrid", pattern: "........;gdangboot", exercises: "template plus pool, star-free" },
     Probe { tier: "hybrid", pattern: "......*;gdangboot", exercises: "template plus pool with a star" },
+    // Subpatterns: a `(...)` group in the template half, matched against a slice
+    // of the word. Length bounds are computed at compile time, so the first four
+    // never search for a cut point — they only walk one. The starred entries are
+    // where the split search actually searches, and where max_structural_steps
+    // is the thing standing between a short pattern and an exponential one.
+    Probe { tier: "subpattern", pattern: "(;oif)(;bel)", exercises: "two fixed-length anagram blocks: exact total length, cut is forced" },
+    Probe { tier: "subpattern", pattern: "(f..;oif)(;bel)", exercises: "a block carrying its own template" },
+    Probe { tier: "subpattern", pattern: "(;oif)(;bel);oifb", exercises: "subpattern plus whole-word anagram; the absorption arithmetic" },
+    Probe { tier: "subpattern", pattern: "(1234)(;1234)", exercises: "a variable bound in one block and spent in the next" },
+    Probe { tier: "subpattern", pattern: "*(;bel)", exercises: "open-ended block: every cut offset is tried" },
+    Probe { tier: "subpattern", pattern: "*(;ing)*", exercises: "block between two stars: the realistic max_structural_steps floor (51)" },
     // Composition. Both spellings of one conjunction are here as a pair on
     // purpose: whitespace around `&` is separator, so they must stay identical in
     // match count (260 on the committed words.txt) and in cost. They once
@@ -178,6 +190,7 @@ const CORPUS: &[Probe] = &[
     Probe { tier: "pathological", pattern: "**********1**********1", exercises: "was 24.7 s and returned 9_778 of 25_193 matches" },
     Probe { tier: "pathological", pattern: "*.*.*.*.*.*.*.*.*.*cat`1", exercises: "dots between stars: the accidental way to rebuild the bad shape" },
     Probe { tier: "pathological", pattern: "*.*.*1*.*.*1", exercises: "digits break the gap runs for real; was 2.9 s and truncated" },
+    Probe { tier: "pathological", pattern: "*(12)*(;12)*(;12)*", exercises: "sets the max_structural_steps floor (329): stars either side of two blocks" },
 ];
 
 /// How much run-to-run spread the machine showed on a fixed workload.
@@ -657,6 +670,11 @@ fn main() {
         base.max_fuzzy_steps as usize,
         &mut overrides,
     ) as u32;
+    let structural = env_usize(
+        "CHA_BENCH_STRUCTURAL",
+        base.max_structural_steps as usize,
+        &mut overrides,
+    ) as u32;
     let max_results = env_usize("CHA_BENCH_MAX_RESULTS", base.max_results, &mut overrides);
     // A deadline far enough out that it never fires, so what is measured is the
     // cost of *having* one rather than the cost of tripping it.
@@ -664,6 +682,7 @@ fn main() {
     let limits = Limits {
         backtrack_limit: backtrack,
         max_fuzzy_steps: fuzzy,
+        max_structural_steps: structural,
         max_results,
         deadline: deadline.then(|| Instant::now() + Duration::from_secs(3600)),
         ..base
