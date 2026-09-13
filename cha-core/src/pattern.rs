@@ -1503,7 +1503,19 @@ impl Walker<'_> {
     }
 
     /// Match one whole node against the slice `start..end`.
+    ///
+    /// **A rigid node may only be handed a slice of exactly `node.min` bytes.**
+    /// `walk` skips its per-token length prune for such a node on the strength of
+    /// that, so a caller that breaks it gets a match reported before the end of
+    /// the slice. Both callers hold to it — the `Sub` arm forces `cut` when
+    /// `sub.min == sub.max`, and `compile_structural`'s early-out is an exact
+    /// byte test — but the guarantee is invisible from inside `walk`, which is
+    /// how it came to be broken once already.
     fn match_node(&mut self, node: &Node, start: usize, end: usize) -> bool {
+        debug_assert!(
+            !node.rigid || end - start == node.min,
+            "a rigid node was handed a slice it did not size"
+        );
         if self.steps == 0 {
             return false;
         }
@@ -1559,13 +1571,24 @@ fn compile_structural(pattern: &str, limits: &Limits) -> Result<(Matcher, bool),
     let max_steps = limits.max_structural_steps;
 
     let matcher: Matcher = Box::new(move |word: &str| {
-        // The same length early-out the other two engines use, and for the same
-        // reason: on a large list almost every word is the wrong length, so this
-        // replaces the whole walk with an integer compare. The `is_ascii` caveat
-        // is the regex path's — a word shorter than `n` bytes can never match,
-        // and bytes only equal chars when the word is ASCII.
+        // The same length early-out the regex path uses, and for the same reason:
+        // on a large list almost every word is the wrong length, so this replaces
+        // the whole walk with an integer compare.
+        //
+        // But **without** that path's `is_ascii` caveat, which does not belong
+        // here. The two count different things: `fixed_len` there is a
+        // *character* count, so its exact test holds only for an ASCII word and
+        // anything else has to be handed to the engine; `min`/`max` here are
+        // *byte* counts, because every token consumes one ASCII byte and every
+        // sub-node carries its own byte bounds. So this test is exact
+        // unconditionally.
+        //
+        // Copying the caveat across was the `(;glo)` bug: it let `golßen` — seven
+        // bytes, not three — reach a walker that `Node::rigid` had told to stop
+        // checking, so the walk consumed "gol", ran out of tokens and reported a
+        // match three bytes from the end of the word.
         if let Some(n) = fixed_len {
-            if word.len() < n || (word.len() != n && word.is_ascii()) {
+            if word.len() != n {
                 return None;
             }
         } else if word.len() < min {
@@ -2899,6 +2922,105 @@ mod tests {
             let c = compile_pattern_checked(pat).unwrap();
             assert!(c.note.is_some(), "{pat} should carry a note");
             assert!((c.matcher)("cat").is_none());
+        }
+    }
+
+    #[test]
+    fn test_structural_length_filter_is_exact_in_bytes() {
+        // The regression this exists for: `(;glo)` matched `golßen` against a
+        // dictionary carrying non-ASCII entries. The walk consumed "gol", ran
+        // out of tokens, and a rigid node reported success without checking it
+        // had reached the end of the word — because the length early-out had let
+        // a wrong-length word through on an `is_ascii` escape hatch copied from
+        // the regex path.
+        //
+        // The two paths count different things. `fixed_len` on the regex path is
+        // a *character* count, so its exact test is only valid for an ASCII word
+        // and anything else has to be left to the engine. Here `min`/`max` are
+        // *byte* counts, so the test is exact and unconditional — and must stay
+        // that way, because `Node::rigid` reads it as a guarantee.
+        //
+        // Every word below is the wrong length *only because* of its non-ASCII
+        // tail. The equivalent ASCII cases were already covered and already
+        // passed, which is exactly why this went unnoticed.
+        for (pat, word) in [
+            ("(;glo)", "gol\u{df}en"),
+            ("(;glo)", "glo\u{e9}"),
+            ("(;oif)(;bel)", "foible\u{e9}"),
+            ("...(;bel)", "foible\u{e9}"),
+            ("(;el)(;bo)w", "elbow\u{e9}"),
+            ("(1234)(;1234)", "reappear\u{e9}"),
+            ("ele(;nahpt)`1", "elephant\u{e9}"),
+            ("(f..;oif)(;bel)", "foible\u{e9}"),
+        ] {
+            assert!(
+                compile_pattern(pat).unwrap()(word).is_none(),
+                "{pat} must not match {word:?}: it is the wrong byte length"
+            );
+        }
+        // The same patterns still match the words they should.
+        for (pat, word) in [
+            ("(;glo)", "log"),
+            ("(;oif)(;bel)", "foible"),
+            ("(;el)(;bo)w", "elbow"),
+            ("(1234)(;1234)", "reappear"),
+            ("ele(;nahpt)`1", "elephant"),
+        ] {
+            assert!(
+                compile_pattern(pat).unwrap()(word).is_some(),
+                "{pat} should still match {word}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_structural_match_implies_an_ascii_word() {
+        // The engine's whole byte-offset argument rests on this claim: nothing it
+        // can match is non-ASCII, so byte offsets are char offsets and every
+        // slice it takes lands on a boundary. Assert it directly rather than
+        // trusting the reasoning — the `(;glo)` bug was a hole in exactly this,
+        // and it survived a test that checked non-ASCII words individually
+        // because that test happened to put the non-ASCII byte where a
+        // subpattern would look at it.
+        let pats = [
+            "(;glo)",
+            "(;oif)(;bel)",
+            "*(;bel)",
+            "(;bel)*",
+            "(1234)(;1234)",
+            "ele(;nahpt)`1",
+            "..(;ing)",
+            "*(;ing)*",
+            "(;oif)(;bel);oifb",
+        ];
+        let words = [
+            "log",
+            "gol\u{df}en",
+            "glo\u{e9}",
+            "foible",
+            "foible\u{e9}",
+            "\u{e9}foible",
+            "f\u{f6}ible",
+            "elephant",
+            "elephant\u{e9}",
+            "singing",
+            "s\u{ed}nging",
+            "able",
+            "abl\u{e9}",
+            "reappear",
+            "reappe\u{e1}r",
+        ];
+        for pat in pats {
+            let m = compile_pattern(pat).unwrap();
+            for w in words {
+                if m(w).is_some() {
+                    assert!(
+                        w.is_ascii(),
+                        "{pat} matched the non-ASCII word {w:?}, which breaks the \
+                         byte-offset argument the engine is built on"
+                    );
+                }
+            }
         }
     }
 
