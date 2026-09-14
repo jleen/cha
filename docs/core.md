@@ -62,6 +62,49 @@ the crate, so a fixed per-word cost shows up there as the largest percentage.
 `perf.sh --compare` reports per pattern precisely so this triage is possible;
 don't summarize it to a single number.
 
+### Two lanes: time, and work
+
+| Lane | Answers | Noise |
+|---|---|---|
+| [`scripts/perf.sh`](../scripts/perf.sh) | "Is it fast on this machine?" | ±3 points; needs an interleaved baseline |
+| [`scripts/icount.sh`](../scripts/icount.sh) | "Did we add work?" | ~0.0001%, and often none at all |
+
+`icount.sh` counts executed instructions under callgrind. It exists because the
+wall-clock lane had taken us as far as it could: two runs of the *same two
+builds* disagree by ~3 points, and two entries in the log below sat at "recorded,
+not explained" for want of an instrument that measures work rather than time.
+
+**Hardware counters are not an option here.**
+`/sys/bus/event_source/devices/` has no `cpu` entry — WSL2 does not expose a PMU
+— so `perf stat -e cycles,instructions` reads `<not supported>`. Callgrind
+simulates instead, which for this purpose is *better*: the same build counts the
+same instructions today, next month, and on someone else's laptop.
+
+Neither lane replaces the other. Ir cannot see a cache miss or a branch
+mispredict, so a change can be free in instructions and still cost real time —
+which is exactly what the dotted row below turned out to be. But a change that
+moves Ir has provably added work, and one that does not has provably not.
+
+**Bracketing, not arithmetic.** Callgrind counts a whole process, and loading
+`words.txt` is ~200M instructions against a ~21M scan. The obvious fix — run N
+scans and 2N scans and subtract — **is unsound**, and is written down here so
+nobody reaches for it: `WordListBuilder` dedups through a `HashSet` with a
+randomly-seeded hasher, so two processes probe differently and their setup costs
+do not cancel. Instead `perf.rs` exposes a `#[no_mangle] #[inline(never)]`
+symbol, `cha_icount_scan`, and callgrind is told
+`--collect-atstart=no --toggle-collect=cha_icount_scan`. No dependency, no client
+-request crate, and it brackets exactly what `perf.sh` times.
+
+**How deterministic, precisely.** A pattern that compiles no regex — `;obelisk` —
+is bit-identical across runs. One that does varies by ~20 instructions in 21M
+(0.0001%), traced to the `regex` crate's randomly-seeded internal hashing at
+compile time. Either way it is four orders of magnitude tighter than the
+wall-clock lane, so the comparison reports every delta with no noise floor and no
+re-measurement: there is nothing to average.
+
+`--quick` runs the priority shapes in about a minute and is cheap enough to run
+before a commit. The full corpus is minutes and stays on demand.
+
 ### Performance log
 
 Percentages, not milliseconds, and **always measured against an interleaved
@@ -82,6 +125,7 @@ commit at a time.
 | Unicode folding | **+7-9%** | **+10-14%** | **+2-4%** | +9-13% | fuzz/digit/subpattern +3-4% |
 | Structural engine goes Unicode | **+4-5%** | **+3-10%** | **wash** | — | fuzz +5%, backref +4-5%, subpattern +2-3% |
 | Pool variables + named surplus letters | **−3%** | **−1 to −2%** | **+3%** | — | subpattern **−5%** |
+| `tally` forced inline (found by `icount.sh`) | wash | **−1.9%** | **−2.6 to −3.1%** | — | instructions: pure anagram **−6.8%**, nothing worse |
 
 **Ranges, because point values here are false precision.** Two interleaved
 same-session runs of the same two builds, 25 reps each on an idle machine,
@@ -104,23 +148,30 @@ Notes on each:
   53 ms as a tier. The cost was 8-10% on *cheap* fuzzy patterns, accepted
   deliberately: fuzz is an uncommon shape, and merging deleted a duplicated
   engine. See the table in "Two engines" below.
+- **`tally` forced inline** closed the row above, and the instruction-count lane
+  found it in a single run. `tally` had been inlined into `Pool::check` by LLVM's
+  heuristics alone; splitting that function for pool variables made it big enough
+  that LLVM stopped, and the call overhead across one scan is 1.4M instructions —
+  the whole +3%. A plain `#[inline]` was not enough (verified: the counts did not
+  move), so it is `#[inline(always)]`. Wall-clock could see the 3% for weeks and
+  never say why.
 - **Pool variables + named surplus letters** came out net *faster*, which was
   not the plan — the goal was a wash. Splitting `Pool::check` so the variable
   path is separate, and reducing the per-combination test to a `bool` instead of
   a 48-byte `MatchInfo`, more than paid for the feature on three of the four
-  groups. The exception is **pure anagram at +3%**, reproduced across four runs
-  and specific to the star-free pure shape; inlining and call-boundary changes
-  did not move it, so it goes in the same box as the dotted row above —
-  recorded, not explained.
+  groups. The exception was **pure anagram at +3%** — since **explained and
+  fixed**: `tally` had stopped being inlined. See the row below.
 - **Structural engine goes Unicode** paid for consistency, and the secondary
   tiers it owns came in under the 10% budget set for them. Pure anagram is a
   wash, as it should be — it runs on a different engine. The row worth
   questioning is **dotted at +4-5%**, which reproduced across three interleaved
   runs on a code path this change does not touch at all: the regex template
-  matcher is byte-identical before and after. Halving the walker's code (the enum
-  experiment below) did not move it, which rules out the obvious explanation, so
-  the remaining candidate is codegen and inlining shifting as the crate changes.
-  Recorded rather than explained. `dotted+anagram` is one pattern and behaved
+  matcher is byte-identical before and after. **Since settled**: the
+  instruction-count lane puts `.....` at 21,339,479 before and 21,338,964 after,
+  and `#@#@#` and `..o..e.` likewise flat to within 0.02%. No work was added, so
+  the wall-clock cost is microarchitectural — layout, alignment or drift — and
+  not something a code change of that commit is responsible for. That is a
+  different and much more comfortable conclusion than "unexplained". `dotted+anagram` is one pattern and behaved
   like it — +3%, +3%, +10% — so treat that cell as the least trustworthy in the
   table.
 - **Unicode folding** is a uniform tax from carrying two forms per word, not one

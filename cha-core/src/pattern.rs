@@ -792,6 +792,16 @@ fn count_chars(chars: &[char], alphabet: &[char]) -> Histogram {
 /// case. Decoding starts only once a non-ASCII byte actually turns up, so a
 /// folded ASCII word — the shipped list entirely, and 99.2% of a large
 /// supplementary one — never decodes anything.
+///
+/// `#[inline(always)]` is load-bearing and was found the hard way. A plain
+/// `#[inline]` is only a hint and LLVM declined it here — verified, the counts
+/// did not move. This used to be
+/// inlined into `Pool::check` by inlining heuristics alone; splitting that
+/// function for pool variables made it big enough that LLVM stopped, which cost
+/// 3% on the pure anagram tier — 1.4M instructions of call overhead across one
+/// scan. Wall-clock could see the 3% but never say why; the instruction-count
+/// lane attributed it in one run. See docs/core.md.
+#[inline(always)]
 fn tally(s: &str, alphabet: &[char]) -> Tally {
     let mut t = Tally {
         hist: Histogram::ZERO,

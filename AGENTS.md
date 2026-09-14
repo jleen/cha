@@ -225,6 +225,15 @@ syntax adds its own entry to `perf.rs`'s corpus in the same commit.
 `cha <pattern> -b <N>` is a quick spot check only: it bypasses `search` and
 reports a bare mean.
 
+**Two lanes, and reach for the second one when a number looks wrong.**
+`./scripts/perf.sh` measures time and drifts a few percent between runs;
+`./scripts/icount.sh` counts instructions under callgrind and does not drift at
+all (`--quick` is ~1 minute). Use the first as the gate. Use the second whenever a
+change *should* be free and isn't, or a delta reproduces but has no explanation —
+it answers "did we add work" in one run, which time cannot. It needs
+`sudo apt install valgrind`; this machine has no PMU, so `perf` proper is not
+available.
+
 **Triage by shape, and log what you cost.** The three shapes people actually
 type — dotted (`..o..e.`), dotted-plus-anagram (`........;gdangboot`), and pure
 anagram (`;..oting`) — are the ones to protect; a starred or fuzzy pattern can

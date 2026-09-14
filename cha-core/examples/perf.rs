@@ -93,7 +93,10 @@ Usage: cargo run --release -p cha-core --example perf -- [OPTIONS]
   --compare [PATH]   diff against a baseline and flag real changes
   --tier <NAME>      run one tier only (see --list)
   --pattern <PAT>    time an ad-hoc pattern instead of the corpus (repeatable)
+  --icount <N>       run one pattern's scan N times and exit, timing nothing
+                     (for ./scripts/icount.sh; not useful on its own)
   --list             print the corpus and what each entry exercises, then exit
+  --list-tsv         the same as tab-separated tier/pattern, for scripts
   --allow-debug      permit a non-release build (the numbers will be garbage)
   -h, --help         this
 
@@ -101,6 +104,32 @@ Environment (defaults are the shipped Limits::interactive values):
   CHA_BENCH_STRUCTURAL, CHA_BENCH_MAX_RESULTS, CHA_BENCH_DEADLINE
 
 Exit status: 0 ok, 1 usage or setup error, 2 timing regression, 3 match counts moved.";
+
+/// The region callgrind is told to count, via
+/// `--collect-atstart=no --toggle-collect=cha_icount_scan`.
+///
+/// `#[no_mangle]` gives it a symbol name the toggle can match; `#[inline(never)]`
+/// stops it being folded into its caller, which would take the toggle point with
+/// it. Both live in this *example*, so nothing in the shipped library changes
+/// shape to accommodate the measurement.
+///
+/// Bracketing rather than arithmetic is the point. Callgrind counts a whole
+/// process, and loading the word list dwarfs a scan — but the obvious fix, "run
+/// N scans and 2N scans and subtract", is unsound: `WordListBuilder` dedups
+/// through a `HashSet` with a randomly-seeded hasher, so two processes probe
+/// differently and their setup costs do not cancel.
+///
+/// `search` recompiles the pattern per call, so this counts compile plus scan —
+/// the same thing `perf.sh` times.
+#[no_mangle]
+#[inline(never)]
+fn cha_icount_scan(lists: &[NamedWordList], pattern: &str, limits: &Limits, reps: usize) -> usize {
+    let mut total = 0usize;
+    for _ in 0..reps {
+        total += search(lists, pattern, limits).map_or(0, |r| r.total);
+    }
+    std::hint::black_box(total)
+}
 
 /// One corpus entry: a pattern, and the code path it is here to keep honest.
 struct Probe {
@@ -306,11 +335,18 @@ struct RunId {
 struct Config {
     words: String,
     reps: usize,
+    /// `--icount N`: run the scan N times inside `cha_icount_scan` and stop.
+    /// Nothing is timed; see `scripts/icount.sh`.
+    icount: Option<usize>,
     save: Option<String>,
     compare: Option<String>,
     tier: Option<String>,
     patterns: Vec<String>,
     list: bool,
+    /// `--list-tsv`: tier and pattern, tab-separated, for `scripts/icount.sh`.
+    /// The human `--list` pads its columns, and a pattern may contain spaces
+    /// (`.... & *t`), so it cannot be parsed back reliably.
+    list_tsv: bool,
     allow_debug: bool,
 }
 
@@ -326,11 +362,13 @@ fn parse_args() -> Config {
         // and best of 16 does not improve on it; the whole suite still runs in
         // well under a minute.
         reps: 9,
+        icount: None,
         save: None,
         compare: None,
         tier: None,
         patterns: Vec::new(),
         list: false,
+        list_tsv: false,
         allow_debug: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -363,6 +401,13 @@ fn parse_args() -> Config {
                     _ => die("--reps needs a positive integer"),
                 };
             }
+            "--icount" => {
+                let v = required_value(&args, &mut i, "--icount");
+                cfg.icount = match v.parse() {
+                    Ok(n) if n > 0 => Some(n),
+                    _ => die("--icount needs a positive integer"),
+                };
+            }
             "--save" => cfg.save = Some(optional_value(&args, &mut i, DEFAULT_BASELINE)),
             "--compare" => cfg.compare = Some(optional_value(&args, &mut i, DEFAULT_BASELINE)),
             "--tier" => cfg.tier = Some(required_value(&args, &mut i, "--tier")),
@@ -371,6 +416,7 @@ fn parse_args() -> Config {
                 cfg.patterns.push(v);
             }
             "--list" => cfg.list = true,
+            "--list-tsv" => cfg.list_tsv = true,
             "--allow-debug" => cfg.allow_debug = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -647,6 +693,13 @@ fn read_baseline(path: &str) -> Baseline {
 fn main() {
     let cfg = parse_args();
 
+    if cfg.list_tsv {
+        for p in CORPUS {
+            println!("{}\t{}", p.tier, p.pattern);
+        }
+        return;
+    }
+
     if cfg.list {
         println!("{:<13} {:<26} exercises", "tier", "pattern");
         for p in CORPUS {
@@ -750,6 +803,22 @@ fn main() {
             Ok(_) => {}
             Err(e) => die(&format!("`{p}` does not compile: {e}")),
         }
+    }
+
+    if let Some(reps) = cfg.icount {
+        // One pattern per process: callgrind reports one total, so two patterns
+        // in one run would be indistinguishable from each other.
+        if probes.len() != 1 {
+            die(&format!(
+                "--icount measures one pattern per process, but {} were selected.\n\
+                 Pass a single --pattern (./scripts/icount.sh does).",
+                probes.len()
+            ));
+        }
+        let (_, pat) = &probes[0];
+        let total = cha_icount_scan(&lists, pat, &limits, reps);
+        println!("icount pattern={pat} reps={reps} matches={}", total / reps);
+        return;
     }
 
     let id = RunId {
