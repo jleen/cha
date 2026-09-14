@@ -188,6 +188,7 @@ const CORPUS: &[Probe] = &[
     Probe { tier: "unicode", pattern: "ω....", exercises: "non-ASCII literal: no ASCII word can match, so this is pure reject cost" },
     Probe { tier: "unicode", pattern: "ωμεγα`1", exercises: "fuzz over non-ASCII: the structural walker's wide instantiation" },
     Probe { tier: "unicode", pattern: "(;ωμε)(;γα)", exercises: "subpattern over non-ASCII: cuts between multi-byte characters" },
+    Probe { tier: "unicode", pattern: "(1234)(;1234)", exercises: "pool-bound digit variables: the per-word alphabet build" },
     // Composition. Both spellings of one conjunction are here as a pair on
     // purpose: whitespace around `&` is separator, so they must stay identical in
     // match count (260 on the committed words.txt) and in cost. They once

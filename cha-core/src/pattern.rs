@@ -921,38 +921,38 @@ impl Pool {
         (!self.has_star).then(|| self.min_spend())
     }
 
-    /// Test one `[...]` combination. `None` means "try the next one"; `Some`
-    /// means the candidate matched, and carries the letters left over on each
-    /// side.
-    fn check_combo(
+    /// Test one `[...]` combination.
+    ///
+    /// Returns a bare `bool` and takes `n_extra` rather than the alphabet,
+    /// because this runs per combination per candidate word and everything it
+    /// does not need is per-word cost. Building the `MatchInfo` here instead —
+    /// a 48-byte return on every combination, almost all of which fail — put 5%
+    /// on the pure anagram tier, one of the three shapes that has to stay a wash.
+    /// Reporting lives in [`Pool::report`], on the confirmed-match path.
+    #[inline]
+    fn combo_matches(
         &self,
         pool_counter: &Histogram,
         pool_base: usize,
         candidate: &Tally,
-    ) -> Option<MatchInfo> {
+        n_extra: usize,
+    ) -> bool {
         let pool_size = pool_base + self.num_wildcards;
 
         if self.is_pure && !self.has_star && candidate.len != pool_size {
-            return None;
+            return false;
         }
 
-        // The "effective pool" is the set of letters the word is measured against
-        // when reporting unused (pool − word) and extra (word − pool) letters.
-        let n_extra = self.alphabet.len();
-        let effective_pool: Histogram = if self.is_pure {
+        if self.is_pure {
             if !pool_counter.covered_by(&candidate.hist, n_extra) {
-                return None;
+                return false;
             }
 
             // A foreign letter is one the pool never names, so it is surplus by
             // definition and counts toward the wildcard allowance like any other.
             let extras = candidate.hist.surplus_over(pool_counter, n_extra) + candidate.foreign;
 
-            if !self.has_star && extras != self.num_wildcards {
-                return None;
-            }
-
-            *pool_counter
+            self.has_star || extras == self.num_wildcards
         } else {
             // Hybrid: full_counter[x] = max(template_count[x], pool_count[x])
             // This models template letters being implicitly in the anagram pool.
@@ -971,31 +971,63 @@ impl Pool {
             // Wildcards license a deviation from either criterion.
             // Wildcards consume pattern symbols without actually adding license,
             // until all wildcards are consumed, at which point they license non-pool letters.
-            if extra_count > self.num_wildcards
-                && unused_count > self.num_wildcards.saturating_sub(candidate.len)
-            {
-                return None;
-            }
+            !(extra_count > self.num_wildcards
+                && unused_count > self.num_wildcards.saturating_sub(candidate.len))
+        }
+    }
 
-            anagram_counter
-        };
+    /// The letters the word is measured against when reporting what it left
+    /// unused and what it carried spare. Recomputed on the confirmed-match path
+    /// rather than returned from every combination.
+    fn effective_pool(&self, pool_counter: &Histogram, n_extra: usize) -> Histogram {
+        if self.is_pure {
+            *pool_counter
+        } else {
+            self.template_counter.max_with(pool_counter, n_extra)
+        }
+    }
 
-        // Match confirmed. Now (and only now) do the extra work of spelling out the
-        // unused (pool − word) and extra (word − pool) letters for display.
-        Some(MatchInfo {
-            unused: diff_letters(&effective_pool, &candidate.hist, &self.alphabet, 0),
-            extra: diff_letters(
-                &candidate.hist,
-                &effective_pool,
-                &self.alphabet,
-                candidate.foreign,
-            ),
-        })
+    /// Spell out the unused (pool − word) and extra (word − pool) letters.
+    /// Confirmed-match path only, which is what lets it allocate.
+    fn report(
+        &self,
+        pool_counter: &Histogram,
+        candidate: &Tally,
+        alphabet: &[char],
+        candidate_str: &str,
+    ) -> MatchInfo {
+        let effective = self.effective_pool(pool_counter, alphabet.len());
+        let mut extra = diff_letters(&candidate.hist, &effective, alphabet);
+        if candidate.foreign > 0 {
+            // Letters the pattern never named. `Tally` counted them without
+            // identifying them, because the reject path has no use for their
+            // identity; naming them is confirmed-match work.
+            extra.push_str(&foreign_letters(candidate_str, alphabet));
+        }
+        MatchInfo {
+            unused: diff_letters(&effective, &candidate.hist, alphabet),
+            extra,
+        }
     }
 
     /// Test a candidate against every `[...]` combination, under `env`.
+    ///
+    /// Split in two so the common path decides once and carries nothing it does
+    /// not use. A shared body that re-tested `vars.is_empty()` measured 1.5%
+    /// slower on the pure anagram tier than this does; the arithmetic itself
+    /// ([`Pool::combo_matches`], [`Pool::confirm`]) is still shared, so there is
+    /// no second copy of the rules to drift.
     fn check(&self, candidate_str: &str, env: &Env) -> Option<MatchInfo> {
-        let candidate = &tally(candidate_str, &self.alphabet);
+        if !self.vars.is_empty() {
+            return self.check_with_vars(candidate_str, env);
+        }
+
+        // The common path is written out here rather than delegated, so it
+        // cannot acquire a call boundary: an early return for the rare case and
+        // then straight into the work. Delegating both halves symmetrically read
+        // better and cost 1.5% on the pure anagram tier.
+        let alphabet = &self.alphabet;
+        let candidate = &tally(candidate_str, alphabet);
 
         // A pure anagram rearranges letters, so a candidate carrying a *non-letter*
         // — a digit, a symbol, `×`, `²` — is not a clean anagram and is rejected.
@@ -1006,54 +1038,95 @@ impl Pool {
             return None;
         }
 
-        for (base_counter, base_size) in &self.combo_pools {
-            // The common case — no digit variables — hands the pre-computed
-            // counter straight through without copying it.
-            let found = if self.vars.is_empty() {
-                self.check_combo(base_counter, *base_size, candidate)
-            } else {
-                let mut adjusted = *base_counter;
-                for &d in &self.vars {
-                    let b = env[d as usize];
-                    // Unbound is ruled out at compile time by
-                    // `check_variable_binding`; degrading to "no match" keeps
-                    // the hot path `Result`-free if it ever slipped through.
-                    //
-                    // A *non-Latin* bound letter is the one documented hole in
-                    // Unicode support. A pool's histogram slots are allocated at
-                    // compile time from the letters the pattern spells out, and
-                    // a variable's letter is not known until match time, so
-                    // there is nowhere to count it. Giving it a dynamic slot
-                    // would mean two digits binding the same letter had to be
-                    // detected and merged, or the counts drift silently — a
-                    // worse failure than not matching. So `(1234)(;1234)` works
-                    // for Latin, which is what it is for, and declines to match
-                    // a word whose letters the fold left non-ASCII.
-                    adjusted.ascii[ascii_slot(b)?] += 1;
-                }
-                self.check_combo(&adjusted, base_size + self.vars.len(), candidate)
-            };
-            if found.is_some() {
-                // `(...)` groups are combo-independent, so this one test decides
-                // for every combination at once: reaching it means some combo
-                // passed, and failing it means none could have. Its *placement*
-                // is load-bearing — `contains` is a substring search, and down
-                // here it runs on the handful of words that already passed the
-                // pool arithmetic rather than on all 83k. Hoisting it above the
-                // loop, where it reads more naturally, cost 36% on
-                // `;(che)rostra`.
-                if !self
-                    .contains
-                    .iter()
-                    .all(|sp| candidate_str.contains(sp.as_str()))
-                {
-                    return None;
-                }
-                return found;
+        let n_extra = alphabet.len();
+        for (counter, size) in &self.combo_pools {
+            if self.combo_matches(counter, *size, candidate, n_extra) {
+                return self.confirm(counter, candidate, alphabet, candidate_str);
             }
         }
-
         None
+    }
+
+    /// The letters this pattern names, extended with whatever its digit
+    /// variables turned out to bind.
+    ///
+    /// **Deduplication is what makes pool variables work at all.** A variable's
+    /// letter is not known until match time, so it cannot have a compile-time
+    /// slot; giving each variable its own slot instead is wrong, because two
+    /// digits binding the *same* letter would then own two slots while the
+    /// candidate's letters land in one, and the counts drift silently. Adding a
+    /// bound letter only if it is not already present collapses that case: the
+    /// slot is shared, the pool counter increments it once per variable (which
+    /// is right — the pool really does want two of that letter), and `tally`
+    /// counts the word into the same place.
+    ///
+    /// Cannot overflow: `parse_pool` caps `alphabet.len() + vars.len()`.
+    fn resolve_alphabet(&self, env: &Env, buf: &mut [char; MAX_EXTRA_LETTERS]) -> usize {
+        debug_assert!(self.alphabet.len() + self.vars.len() <= MAX_EXTRA_LETTERS);
+        let mut n = self.alphabet.len();
+        buf[..n].copy_from_slice(&self.alphabet);
+        for &d in &self.vars {
+            let c = env[d as usize];
+            if !c.is_ascii() && !buf[..n].contains(&c) {
+                buf[n] = c;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// The pool spends digit variables, so the alphabet is only known once they
+    /// are bound. Everything here is per word, which is why it is kept off the
+    /// path above.
+    fn check_with_vars(&self, candidate_str: &str, env: &Env) -> Option<MatchInfo> {
+        let mut buf = [UNBOUND; MAX_EXTRA_LETTERS];
+        let n = self.resolve_alphabet(env, &mut buf);
+        let alphabet = &buf[..n];
+        let candidate = &tally(candidate_str, alphabet);
+
+        if self.is_pure && candidate.has_other {
+            return None;
+        }
+
+        for (base_counter, base_size) in &self.combo_pools {
+            let mut adjusted = *base_counter;
+            for &d in &self.vars {
+                // Unbound is ruled out at compile time by
+                // `check_variable_binding`; degrading to "no match" keeps the hot
+                // path `Result`-free if it ever slipped through.
+                let c = env[d as usize];
+                match ascii_slot(c) {
+                    Some(i) => adjusted.ascii[i] += 1,
+                    // Present by construction — `resolve_alphabet` just put it
+                    // there — so the lookup is a formality.
+                    None => adjusted.extra[alphabet.iter().position(|&a| a == c)?] += 1,
+                }
+            }
+            let size = base_size + self.vars.len();
+            if self.combo_matches(&adjusted, size, candidate, n) {
+                return self.confirm(&adjusted, candidate, alphabet, candidate_str);
+            }
+        }
+        None
+    }
+
+    /// A combination matched: apply the combo-independent `(...)` test, then
+    /// build the detail.
+    fn confirm(
+        &self,
+        pool_counter: &Histogram,
+        candidate: &Tally,
+        alphabet: &[char],
+        candidate_str: &str,
+    ) -> Option<MatchInfo> {
+        if !self
+            .contains
+            .iter()
+            .all(|sp| candidate_str.contains(sp.as_str()))
+        {
+            return None;
+        }
+        Some(self.report(pool_counter, candidate, alphabet, candidate_str))
     }
 }
 
@@ -1201,10 +1274,17 @@ fn parse_pool(
             alphabet.push(c);
         }
     }
-    if alphabet.len() > MAX_EXTRA_LETTERS {
+    // Counting the variables, because each one may bind a letter this pattern
+    // never spells out and `resolve_alphabet` will need a slot for it. Capping
+    // the sum here is what lets that run without a bounds check and without ever
+    // silently declining to match — a limit that truncates is a correctness bug.
+    if alphabet.len() + vars.len() > MAX_EXTRA_LETTERS {
         return Err(PatternError(format!(
-            "Pattern names {} different non-ASCII letters; the limit is {}",
+            "Pattern needs {} non-ASCII letter slots ({} spelled out, {} for digit \
+             variables); the limit is {}",
+            alphabet.len() + vars.len(),
             alphabet.len(),
+            vars.len(),
             MAX_EXTRA_LETTERS
         )));
     }
@@ -1268,7 +1348,7 @@ fn compile_anagram(
 
 /// Build an uppercase, alphabetically-sorted string of the letters in `more` that
 /// exceed `less` (per-letter, by count). Used to spell out unused and extra letters.
-fn diff_letters(more: &Histogram, less: &Histogram, alphabet: &[char], foreign: usize) -> String {
+fn diff_letters(more: &Histogram, less: &Histogram, alphabet: &[char]) -> String {
     let mut out = String::new();
     for i in 0..26 {
         for _ in 0..more.ascii[i].saturating_sub(less.ascii[i]) {
@@ -1280,13 +1360,24 @@ fn diff_letters(more: &Histogram, less: &Histogram, alphabet: &[char], foreign: 
             out.extend(letter.to_uppercase());
         }
     }
-    // Letters the pattern never named are always surplus, and only the word side
-    // ever has them. They were counted rather than identified on the hot path, so
-    // spell them as `?` — one per letter, which is what the count is good for.
-    for _ in 0..foreign {
-        out.push('?');
-    }
     out
+}
+
+/// The letters of `s` that `alphabet` does not name, uppercased and sorted.
+///
+/// These are exactly the ones [`Tally`] counted as `foreign`: alphabetic,
+/// outside ASCII, and outside the pattern's alphabet. They used to be rendered
+/// `?`, one per letter, because the hot path had counted them without looking at
+/// them — but a user reading `+?` learns nothing, and this runs only once a word
+/// has already matched.
+fn foreign_letters(s: &str, alphabet: &[char]) -> String {
+    let mut letters: Vec<char> = s
+        .chars()
+        .filter(|c| !c.is_ascii() && c.is_alphabetic() && !alphabet.contains(c))
+        .flat_map(char::to_uppercase)
+        .collect();
+    letters.sort_unstable();
+    letters.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3110,6 +3201,35 @@ mod tests {
     }
 
     #[test]
+    fn test_surplus_letters_are_named_not_questioned() {
+        // These used to render as `?`, one per letter — the count was all the
+        // hot path had, and `+?` tells a user nothing. Naming them is
+        // confirmed-match work, so it costs the reject path nothing.
+        let m = compile_pattern(".....;\u{3c9}\u{3bc}\u{3b5}\u{3b3}").unwrap();
+        let info = m("\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}").expect("should match");
+        assert_eq!(info.extra, "\u{391}"); // Α, uppercased
+                                           // Several surplus letters come back sorted.
+        let m = compile_pattern(".....;\u{3c9}\u{3bc}\u{3b5}").unwrap();
+        let info = m("\u{3c9}\u{3bc}\u{3b5}\u{3b3}\u{3b1}").expect("should match");
+        assert_eq!(info.extra, "\u{391}\u{393}"); // ΑΓ
+                                                  // ASCII and non-ASCII surplus report together, ASCII first.
+        let m = compile_pattern(".....;\u{3c9}\u{3bc}\u{3b5}").unwrap();
+        let info = m("\u{3c9}\u{3bc}\u{3b5}z\u{3b1}").expect("should match");
+        assert_eq!(info.extra, "Z\u{391}");
+    }
+
+    #[test]
+    fn test_ascii_deltas_are_unchanged() {
+        // The whole point of guarding the foreign walk on `foreign > 0`: an
+        // all-ASCII pattern must produce byte-identical detail to before.
+        let info = compile_pattern("........;gdangboot").unwrap()("toboggan").unwrap();
+        assert_eq!(info.unused, "D");
+        assert_eq!(info.extra, "");
+        let info = compile_pattern(";..oting").unwrap()("tonight").unwrap();
+        assert_eq!(info.extra, "HT");
+    }
+
+    #[test]
     fn test_anagram_mixes_scripts_and_reports_foreign_letters() {
         // A pool naming non-ASCII letters gets `extra` slots for exactly those;
         // any other letter is *foreign* — counted on the hot path, identified
@@ -3166,26 +3286,71 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_variable_binding_a_non_latin_letter_is_the_documented_hole() {
-        // The one place non-ASCII does not "just work", and it is deliberate. A
-        // pool's histogram slots are allocated at compile time from the letters
-        // the pattern spells out; a variable's letter is not known until match
-        // time, so a non-Latin one has nowhere to be counted. Giving it a dynamic
-        // slot would mean detecting two digits that bind the same letter and
-        // merging them, or the counts drift silently — a worse failure than not
-        // matching.
+    fn test_pool_variables_bind_letters_of_any_script() {
+        // This test used to pin the opposite — a pool variable binding a
+        // non-Latin letter declined to match, because a pool's histogram slots
+        // are allocated at compile time and a variable's letter is not known
+        // until match time. `resolve_alphabet` settles it per word.
         let m = compile_pattern("(1234)(;1234)").unwrap();
-        // Latin, which is what the feature is for: works.
+        // Latin, which is what the feature was built for, is unaffected.
         assert!(m("reappear").is_some());
         assert!(m("teammate").is_some());
-        // Non-Latin: declines to match rather than miscounting.
-        assert!(m("\u{3b1}\u{3b2}\u{3b3}\u{3b4}\u{3b4}\u{3b3}\u{3b2}\u{3b1}").is_none());
-        // A variable spent in the *template* is unaffected — only pools have the
-        // fixed slot table.
-        assert!(compile_pattern("(1234)(4321)").unwrap()(
-            "\u{3b1}\u{3b2}\u{3b3}\u{3b4}\u{3b4}\u{3b3}\u{3b2}\u{3b1}"
-        )
-        .is_some());
+        // And a Greek word now works the same way: αβγδ then an anagram of it.
+        assert!(m("\u{3b1}\u{3b2}\u{3b3}\u{3b4}\u{3b4}\u{3b3}\u{3b2}\u{3b1}").is_some());
+        assert!(m("\u{3b1}\u{3b2}\u{3b3}\u{3b4}\u{3b1}\u{3b2}\u{3b3}\u{3b5}").is_none());
+    }
+
+    #[test]
+    fn test_two_variables_binding_one_letter_share_a_slot() {
+        // The case that made the naive design wrong, and the reason
+        // `resolve_alphabet` deduplicates. Give each variable its own slot and
+        // `(11)(;11)` asks for two ωs in two different buckets while the word's
+        // ωs land in one — the pool looks unsatisfied and the count drifts
+        // silently, which is worse than the gap it replaced.
+        let m = compile_pattern("(11)(;11)").unwrap();
+        assert!(m("\u{3c9}\u{3c9}\u{3c9}\u{3c9}").is_some()); // ωωωω
+        assert!(m("\u{3c9}\u{3c9}\u{3c9}\u{3b1}").is_none()); // ωωωα — only one ω to spend
+                                                              // Two *distinct* variables keep distinct slots, so this is looser.
+        let n = compile_pattern("(12)(;12)").unwrap();
+        assert!(n("\u{3c9}\u{3c9}\u{3c9}\u{3c9}").is_some());
+        assert!(n("\u{3c9}\u{3b1}\u{3c9}\u{3b1}").is_some()); // ωαωα
+    }
+
+    #[test]
+    fn test_variable_sharing_a_slot_with_a_pool_literal() {
+        // A bound letter that the pool *also* spells out has to land in the same
+        // slot from both directions — one from compile time, one from match time.
+        let m = compile_pattern("(1..)(;1\u{3c9}\u{3bc})").unwrap();
+        // 1 binds ω, so the pool is {ω, ω, μ}: the second block must be an
+        // anagram of that.
+        assert!(m("\u{3c9}xy\u{3c9}\u{3c9}\u{3bc}").is_some());
+        // Only one ω to give, so this falls short.
+        assert!(m("\u{3c9}xy\u{3c9}\u{3bc}\u{3bc}").is_none());
+    }
+
+    #[test]
+    fn test_pool_variables_still_bind_ascii_letters() {
+        // The ASCII path through `resolve_alphabet` adds nothing to the alphabet
+        // at all — the letter goes to its `a`-`z` bucket as it always did.
+        let m = compile_pattern("c(1)t;1").unwrap();
+        assert!(m("cat").is_some());
+        assert!(m("cot").is_some());
+        assert!(m("cast").is_none());
+    }
+
+    #[test]
+    fn test_letter_slots_are_capped_at_compile_time() {
+        // The cap has to count variables, not just spelled-out letters, or
+        // `resolve_alphabet` could overflow its buffer. Exceeding it is a
+        // `PatternError` — never a quiet non-match, which is the rule a limit
+        // that truncates would break.
+        let letters: String = (0x3b1..0x3b1 + MAX_EXTRA_LETTERS as u32)
+            .filter_map(char::from_u32)
+            .collect();
+        // Exactly at the cap with no variables: fine.
+        assert!(compile_pattern(&format!(";{letters}")).is_ok());
+        // The same pool plus one variable to bind needs one slot too many.
+        assert!(compile_pattern(&format!("(1);{letters}1")).is_err());
     }
 
     #[test]

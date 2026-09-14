@@ -81,6 +81,7 @@ commit at a time.
 | Two engines (`a8d6cad`) | — | — | — | — | backref **−87%**, pathological **−68%**, cheap fuzz **+8-10%** |
 | Unicode folding | **+7-9%** | **+10-14%** | **+2-4%** | +9-13% | fuzz/digit/subpattern +3-4% |
 | Structural engine goes Unicode | **+4-5%** | **+3-10%** | **wash** | — | fuzz +5%, backref +4-5%, subpattern +2-3% |
+| Pool variables + named surplus letters | **−3%** | **−1 to −2%** | **+3%** | — | subpattern **−5%** |
 
 **Ranges, because point values here are false precision.** Two interleaved
 same-session runs of the same two builds, 25 reps each on an idle machine,
@@ -103,6 +104,14 @@ Notes on each:
   53 ms as a tier. The cost was 8-10% on *cheap* fuzzy patterns, accepted
   deliberately: fuzz is an uncommon shape, and merging deleted a duplicated
   engine. See the table in "Two engines" below.
+- **Pool variables + named surplus letters** came out net *faster*, which was
+  not the plan — the goal was a wash. Splitting `Pool::check` so the variable
+  path is separate, and reducing the per-combination test to a `bool` instead of
+  a 48-byte `MatchInfo`, more than paid for the feature on three of the four
+  groups. The exception is **pure anagram at +3%**, reproduced across four runs
+  and specific to the star-free pure shape; inlining and call-boundary changes
+  did not move it, so it goes in the same box as the dotted row above —
+  recorded, not explained.
 - **Structural engine goes Unicode** paid for consistency, and the secondary
   tiers it owns came in under the 10% budget set for them. Pure anagram is a
   wash, as it should be — it runs on a different engine. The row worth
@@ -440,19 +449,28 @@ simpler choice; it cost the subpattern tier 7.5% against the generic version's
 2.1%, worst case 29% against 8%, and helped nothing elsewhere. Monomorphizing
 keeps the ASCII instantiation equal to the byte walker that preceded it.
 
-### The one place non-ASCII does not just work
+### Pool-bound digit variables, and why deduplication is the whole trick
 
-A digit variable *spent inside an anagram pool* — `(1234)(;1234)` — binds at
-match time, and a `Pool`'s histogram slots are allocated at compile time from the
-letters the pattern spells out. There is nowhere to count a non-Latin letter the
-pattern could not name in advance, so `Pool::check` declines rather than
-miscounting.
+A digit variable *spent inside a pool* — `(1234)(;1234)` — binds at match time,
+but a `Pool`'s histogram slots are allocated at compile time from the letters the
+pattern spells out. This was a documented hole for one release: a non-Latin bound
+letter had nowhere to be counted, so it declined to match.
 
-The alternative needs slots assigned per word, and then two digits that bind the
-*same* letter have to be detected and merged or the counts drift silently — a
-worse failure than not matching. `(1234)(;1234)` keeps working for Latin, which
-is what it is for. Pinned by
-`test_pool_variable_binding_a_non_latin_letter_is_the_documented_hole`.
+The obvious fix is wrong. Give each variable its own slot and two digits binding
+the *same* letter own two slots while the candidate's letters land in one — the
+pool looks unsatisfied and the counts drift silently, which is worse than the gap
+it replaces. `Pool::resolve_alphabet` deduplicates instead: a bound letter is
+added only if absent, so the slot is shared, the pool counter increments it once
+per variable (right — the pool really does want two of that letter), and `tally`
+counts the word into the same place. `(11)(;11)` matching `ωωωω` and rejecting
+`ωωωα` is the test that pins it.
+
+Two things keep it off the common path. The per-word buffer is built only inside
+`check_with_vars`, and `check` writes the var-free path out longhand rather than
+delegating — a shared body that re-tested `vars.is_empty()` cost 1.5% on the pure
+anagram tier. And `parse_pool` caps `alphabet.len() + vars.len()` rather than just
+the literals, so the per-word build provably cannot overflow and the failure is a
+`PatternError` rather than a quiet non-match.
 
 ### Absorption: which letters excuse the outer pool
 
