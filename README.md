@@ -10,6 +10,19 @@ Windows, and Linux; as well as a CLI tool that will run on pretty much anything
 that Rust can target.  In addition, the core pattern matcher is provided as a
 standalone crate.
 
+## AI Statement
+
+As you‘ll notice from the commit history, this code is mostly AI-generated.
+This is my (the author‘s) first nontrivial AI-assisted software project, so I
+make no claims about code quality or even whether I‘m doing any of this the
+right way. On the other hand, I‘ve been using this codebase for my own
+puzzle-solving activities and it‘s been useful to me, so I offer it in the hope
+that it might be useful to you.
+
+The comments in the source code, and the technical documentation in the `docs`
+directory, are mostly written by and for the LLM. This README and the in-app
+help screen are written by and for humans.
+
 ## Word list
 
 A word list is provided, based on the [12dicts](https://wyrdplay.org/12dicts.html) lists. You can also provide your own word list as a text file, one word per line; case and accents are normalized for matching and preserved for display.
@@ -30,8 +43,9 @@ See
 
 ## GUI usage
 
-Just install and run the application. If no word lists are found,
-you’ll see a message with a button that opens the word list folder for you.
+Just install and run the application. You can immediately start doing
+word searches in the default dictionary. If you want to bring your own dictionary, File -> Open Dictionary Folder will open a folder on your desktop where you can drop a custom dictionary
+file, one word per line.
 
 ## CLI usage
 
@@ -41,143 +55,19 @@ cha -i        [-d] [-w wordlist]
 ```
 
 By default, `cha` loads its word list from `./words.txt`. Specify a different
-word list with `-w`.  Display added/dropped anagram letters with `-d`.
+word list with `-w`.
 
 Either specify a pattern on the command line, or pass `-i` / `--interactive` to
 enter an interactive loop which will repeatedly prompt for a pattern and return
 results.  Enter `^D` on an empty line to exit.
 
-## Patterns
+Default output is just a list of matching words. With `-d`, you‘ll
+also see the added or dropped letters from an anagram pool.
 
-| Token | Meaning |
-|-------|---------|
-| `.` | One letter |
-| `*` | Zero or more letters |
-| `@` | A vowel (a e i o u) |
-| `#` | A consonant |
-| `[abc]` | One letter from the set |
-| `a`–`z` | Literal letter (case-insensitive) |
-| `-` `'` ` ` | Punctuation (see below) |
-| `1`–`9` | Same letter as other occurences of that digit|
-| `` `N `` | Allow up to *N* literal letters to vary |
-| `(…)` | A subpattern (see below) |
+## Pattern Syntax
 
-### Variant matching
-
-The `` `N `` syntax specifies that `N` many literals can be
-“wrong”, i.e. different from the given.  Thus `` foo`1 `` will match `foe` and `goo`.
-Only literal letters can vary: wildcards, character classes and subpatterns are
-rigid, and spend no budget. It cannot be combined with an anagram pool or with a
-digit variable.
-
-```
-cat`1     # CAT, BAT, CAR, COT, … (one letter off)
-electron`2  # up to two letters off
-.at`1     # the `.` still matches any letter; only `a` or `t` may vary
-```
-
-### Punctuation
-
-Punctuation in the word list is ignored, unless punctuation is provided
-in the pattern. If the pattern is punctuated then the word must match the
-punctuation.
-
-### Examples
-
-```
-.y...l        # HYMNAL, SYMBOL, …
-@#@#@#@#@#@   # alternating vowel/consonant, 11 letters
-1234321       # palindromes (DEIFIED, RACECAR, …)
-...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)
-```
-
-### Anagrams
-
-A semicolon introduces an anagram pool. Letters before `;` are a template;
-letters after `;` are the pool.
-
-```
-;ilphone          # anagram of ILPHONE → PINHOLE, …
-;..exit           # anagram of EXIT + 2 wildcards
-;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
-t....;intra       # starts with T, is an anagram of INTRA
-;(che)rostra      # anagram of CHEROST RA that contains CHE exactly
-```
-
-### Accents and other scripts
-
-Patterns and words are matched in a canonical form: **case and accents are
-ignored, and the original spelling comes back.** So `elan` finds ÉLAN and prints
-it as `élan`, and `naivete` finds `naïveté`. It works in both directions — you can
-type the accents if you like.
-
-A few letters that Unicode treats as their own rather than as accented ones are
-written out the way they are spelled: `æ`→`ae`, `ø`→`o`, `þ`→`th`, `ð`→`d`,
-`ł`→`l`, `ß`→`ss`. So `aero` finds ÆRØ and `strasse` finds STRASSE. **Length is
-counted after that**, so ÆRØ is four letters and matches `....`, not `...`.
-
-Letters from other scripts are letters in their own right, not spellings of Latin
-ones: `ω` is not `o`, so `.....` matches ΩΜΈΓΑ but `omega` does not. `@` and `#`
-stay Latin-only — there is no locale-free answer to whether `ω` is a vowel.
-Anything that is not a letter, in any script, is treated as `cha` has always
-treated `7` and `/`.
-
-This holds across the whole syntax — templates, anagrams, subpatterns, digit
-variables and `` `N `` alike. `.....`, `` .....`1 `` and `(.....)` all match
-ΩΜΈΓΑ, and `(1234)(;1234)` binds its letters in any script.
-
-### Subpatterns
-
-Parentheses in the template introduce a **subpattern**: a whole pattern applied
-to a contiguous slice of the word, with the slices laid end to end covering all
-of it. The point is that a subpattern can carry an anagram of its own, so you
-can ask for a word made of anagram blocks.
-
-```
-(;oif)(;bel)        # FOI + BLE → FOIBLE
-(...;oif)(;bel)     # same, with a template on the first block
-(f..;oif)(;bel)     # …and a letter pinned in it
-(;el)(;bo)w         # blocks mix with ordinary tokens → ELBOW
-*(;bel)             # ends in some arrangement of B, E, L
-```
-
-Parentheses with no `;` inside constrain nothing, so `ele(ph)ant` is just
-`elephant`. `&` and `!` are whole-query operators and cannot appear inside a
-subpattern. `` `N `` can: the block stays rigid and the literals around it vary,
-so `` ele(;nahpt)`1 `` matches ELEPHANT and ALEPHANT.
-
-A digit variable is one variable across the whole pattern, so it can be bound in
-one block and spent in another — including inside an anagram pool, which is the
-one place a digit was previously meaningless:
-
-```
-(1234)(;1234)     # 4 letters, then an anagram of those same 4 → REAPPEAR
-c(1)t;1           # the pool spends whatever the template bound
-```
-
-A variable has to be bound before it is spent, reading left to right, so
-`(;1234)(1234)` is an error.
-
-When a subpattern *and* the whole pattern both have an anagram, the rule is that
-**a letter excuses the outer pool from naming it only if it sits in a template
-position — before a `;` — at any depth. A letter in any pool never does.** So
-against FOIBLE:
-
-```
-(;oif)(;bel);oifb      # matches: the word uses all of O, I, F, B
-(;oif)(;bel);oifblex   # matches: the word uses only pool letters (X spare)
-(;oif)(;bel);oifblx    # no: an E left over *and* an X unused
-```
-
-### Logic
-
-Use `&` to combine patterns and `!` to negate:
-
-```
-c.. & *at          # three-letter word starting with C and ending in AT
-;intra & ! *a      # anagram match but not ending in -A
-!c* & !*t          # doesn't start with C, doesn't end in T
-```
+See the [pattern syntax overview](cha-gui/help/pattern-syntax.md),
+which also appears as the in-app help text.
 
 ## Building
 
@@ -211,10 +101,6 @@ cargo tauri build    # compile and package a release build
 
 ## Benchmarking
 
-The CLI supports a benchmarking mode that will load the word list once and
-do a word search repeatedly, for performance profiling purposes.
-Pass `-b N` to run the matcher N times and report the elapsed time:
-
-```
-cha ';..exit' -b 1000
-```
+The CLI has a “benchmarking” mode: if you run `cha <pattern> -b<N>`, it will load the dictionary once, and then run the pattern search *N* times in succession,
+for performance profiling purposes (the goal being to isolate
+the load-time overhead from the search performance).
