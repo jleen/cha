@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- GENERATED from cha-gui/help/pattern-syntax.md and pattern-syntax.template.html.
+     Do not edit by hand: edit those, then run
+       UPDATE_HELP=1 cargo test -p cha-gui --test help_page
+     `cargo test --workspace` fails while this file is stale. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Pattern Syntax</title>
+    <link rel="stylesheet" href="pattern-syntax.css" />
+    <!-- See desktop.rs: the desktop app opens this page with `?platform=desktop`,
+         and this mirrors that onto <html> so the stylesheet can hide the link to
+         the license page (desktop has Help > About Cha instead). Backend-supplied
+         truth passed through the URL, not user-agent sniffing — this page is
+         static and runs no IPC. Inline and in <head> so the link never flashes
+         before it is hidden. -->
+    <script>
+      if (new URLSearchParams(location.search).get("platform") === "desktop")
+        document.documentElement.classList.add("desktop");
+    </script>
+  </head>
+  <body>
+    <main>
+{{content}}
+      <p class="footer"><a href="license.html">Open-source licenses</a></p>
+    </main>
+  </body>
+</html>

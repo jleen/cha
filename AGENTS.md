@@ -23,6 +23,7 @@ worth opening before you work in that area:
 | [docs/web.md](docs/web.md) | change an `/api` route, a server-side limit, the Dockerfile, or anything in `deploy/` |
 | [docs/mobile.md](docs/mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
 | [docs/versioning.md](docs/versioning.md) | bump the version, or wonder where a version string comes from |
+| [docs/patterns.md](docs/patterns.md) | add or change pattern syntax — it is the user-facing reference, and must be updated in the same commit |
 
 **Keep this file short: every session loads it, whether or not the work touches a
 given rule.** The bar for adding here is not "true and useful" but "an agent would
@@ -40,6 +41,20 @@ get this wrong without being told, before it knows which files to open".
 
 A section growing past a screen is the signal to move its detail into `docs/` and
 leave a pointer. Prefer replacing text over appending to it.
+
+## The maintainer's own voice
+
+Two documents are written by the maintainer, by hand, as the project's face to
+users: the root [README.md](README.md) and the in-app help source
+[cha-gui/help/pattern-syntax.md](cha-gui/help/pattern-syntax.md). **Edit them only
+when asked** — not to fix a fact, not to add new syntax. When a change makes one
+of them wrong, say so and propose wording in your reply. The complete,
+AI-written reference is [docs/patterns.md](docs/patterns.md); that one is yours to
+keep current.
+
+`cha-gui/ui/pattern-syntax.html` is generated from that help source, so never edit
+it by hand. `cargo test --workspace` fails while it is stale;
+`UPDATE_HELP=1 cargo test -p cha-gui --test help_page` regenerates it.
 
 ## Building and checking
 

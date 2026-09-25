@@ -1,4 +1,8 @@
 <!DOCTYPE html>
+<!-- GENERATED from cha-gui/help/pattern-syntax.md and pattern-syntax.template.html.
+     Do not edit by hand: edit those, then run
+       UPDATE_HELP=1 cargo test -p cha-gui --test help_page
+     `cargo test --workspace` fails while this file is stale. -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -21,144 +25,68 @@
   </head>
   <body>
     <main>
-      <h1>Pattern Syntax</h1>
-
-      <table class="tokens">
-        <thead>
-          <tr>
-            <th>Token</th>
-            <th>Meaning</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td><code>.</code></td><td>One letter</td></tr>
-          <tr><td><code>*</code></td><td>Zero or more letters</td></tr>
-          <tr><td><code>@</code></td><td>A vowel (a e i o u)</td></tr>
-          <tr><td><code>#</code></td><td>A consonant</td></tr>
-          <tr><td><code>[abc]</code></td><td>One letter from the set</td></tr>
-          <tr><td><code>a</code>–<code>z</code></td><td>Literal letter (case-insensitive)</td></tr>
-          <tr><td><code>-</code> <code>'</code> <code>&nbsp;</code></td><td>Punctuation (see below)</td></tr>
-          <tr><td><code>1</code>–<code>9</code></td><td>Same letter as other occurrences of that digit</td></tr>
-          <tr><td><code>`N</code></td><td>Allow up to <em>N</em> literal letters to vary</td></tr>
-          <tr><td><code>(…)</code></td><td>A subpattern (see below)</td></tr>
-        </tbody>
-      </table>
-
-      <h2>Variant matching</h2>
-      <p>
-        The <code>`N</code> syntax specifies that <code>N</code> many literals can
-        be “wrong”, i.e. different from the given. Thus <code>foo`1</code> will
-        match <code>foe</code> and <code>goo</code>. Only literal letters can
-        vary: wildcards, character classes and subpatterns are rigid, and spend no
-        budget. It cannot be combined with an anagram pool or with a digit
-        variable.
-      </p>
-      <pre><code>cat`1       # CAT, BAT, CAR, COT, … (one letter off)
-electron`2  # up to two letters off
-.at`1       # the . still matches any letter; only a or t may vary</code></pre>
-
-      <h2>Punctuation</h2>
-      <p>
-        Punctuation in the word list is ignored, unless punctuation is provided
-        in the pattern. If the pattern is punctuated then the word must match the
-        punctuation.
-      </p>
-
-      <h2>Examples</h2>
-      <pre><code>.y...l        # HYMNAL, SYMBOL, …
+<h2>Pattern Syntax</h2>
+<table><thead><tr><th>Token</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>.</code></td><td>One letter</td></tr>
+<tr><td><code>*</code></td><td>Zero or more letters</td></tr>
+<tr><td><code>@</code></td><td>One vowel (a/e/i/o/u)</td></tr>
+<tr><td><code>#</code></td><td>One consonant</td></tr>
+<tr><td><code>[abc]</code></td><td>Matches any one of these letters</td></tr>
+<tr><td><code>a</code>–<code>z</code></td><td>Literal letter (case-insensitive)</td></tr>
+<tr><td><code>-</code> <code>'</code> <code> </code></td><td>Literal punctuation</td></tr>
+<tr><td><code>1</code>–<code>9</code></td><td>Same letter as other occurences of that digit</td></tr>
+<tr><td><code>`N</code></td><td>Allow up to <em>N</em> ”wrong” letters</td></tr>
+<tr><td>' <code>;</code></td><td>Introduces an anagram</td></tr>
+<tr><td><code>(…)</code></td><td>Subpattern, which may itself be an angram</td></tr>
+</tbody></table>
+<h3>Wrong letters</h3>
+<p>A pattern postfixed with <code>`N</code> means that <code>N</code> many literals can be
+“wrong,” i.e. different from the given.</p>
+<ul>
+<li><code>foo`1</code> will match <code>foe</code> and <code>goo</code>.</li>
+<li><code>electron`2</code> will match <code>ejection</code> and several others.</li>
+</ul>
+<p>This feature can’t be combined with anagrams or backreferences (yet).</p>
+<h3>Punctuation</h3>
+<p>Punctuation in the word list is ignored, unless punctuation is provided
+in the pattern. If the pattern is punctuated then the word must match the
+punctuation.</p>
+<h3>Examples</h3>
+<pre><code>.y...l        # HYMNAL, SYMBOL, …
 @#@#@#@#@#@   # alternating vowel/consonant, 11 letters
 1234321       # palindromes (DEIFIED, RACECAR, …)
-...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)</code></pre>
-
-      <h2>Anagrams</h2>
-      <p>
-        A semicolon introduces an anagram pool. Letters before <code>;</code> are
-        a template; letters after <code>;</code> are the pool.
-      </p>
-      <pre><code>;ilphone          # anagram of ILPHONE → PINHOLE, …
+...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)
+</code></pre>
+<h3>Anagrams</h3>
+<p>A semicolon introduces an anagram pool. Letters before <code>;</code> are a template;
+letters after <code>;</code> are the pool.</p>
+<pre><code>;ilphone          # anagram of ILPHONE → PINHOLE, …
 ;..exit           # anagram of EXIT + 2 wildcards
 ;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
 t....;intra       # starts with T, is an anagram of INTRA
-;(che)rostra      # anagram of CHEROST RA that contains CHE exactly</code></pre>
-
-      <h2>Accents and other scripts</h2>
-      <p>
-        Patterns and words are matched in a canonical form: <strong>case and
-        accents are ignored, and the original spelling comes back.</strong> So
-        <code>elan</code> finds ÉLAN and shows it as <code>élan</code>, and
-        <code>naivete</code> finds <code>naïveté</code>. It works in both
-        directions — you can type the accents if you like.
-      </p>
-      <p>
-        A few letters that Unicode treats as their own rather than as accented
-        ones are written out the way they are spelled: <code>æ</code>→<code>ae</code>,
-        <code>ø</code>→<code>o</code>, <code>þ</code>→<code>th</code>,
-        <code>ð</code>→<code>d</code>, <code>ł</code>→<code>l</code>,
-        <code>ß</code>→<code>ss</code>. So <code>aero</code> finds ÆRØ.
-        <strong>Length is counted after that</strong>, so ÆRØ is four letters and
-        matches <code>....</code>, not <code>...</code>.
-      </p>
-      <p>
-        Letters from other scripts are letters in their own right, not spellings
-        of Latin ones: <code>ω</code> is not <code>o</code>, so <code>.....</code>
-        matches ΩΜΈΓΑ but <code>omega</code> does not. <code>@</code> and
-        <code>#</code> stay Latin-only — there is no locale-free answer to whether
-        <code>ω</code> is a vowel. Anything that is not a letter, in any script, is
-        treated the way <code>7</code> and <code>/</code> have always been.
-      </p>
-      <p>
-        This holds across the whole syntax — templates, anagrams, subpatterns,
-        digit variables and <code>`N</code> alike. <code>.....</code>,
-        <code>.....`1</code> and <code>(.....)</code> all match ΩΜΈΓΑ, and
-        <code>(1234)(;1234)</code> binds its letters in any script.
-      </p>
-
-      <h2>Subpatterns</h2>
-      <p>
-        Parentheses in the template introduce a <em>subpattern</em>: a whole
-        pattern applied to a contiguous slice of the word, with the slices laid
-        end to end covering all of it. The point is that a subpattern can carry
-        an anagram of its own, so you can ask for a word made of anagram blocks.
-      </p>
-      <pre><code>(;oif)(;bel)        # FOI + BLE → FOIBLE
-(...;oif)(;bel)     # same, with a template on the first block
-(f..;oif)(;bel)     # …and a letter pinned in it
-(;el)(;bo)w         # blocks mix with ordinary tokens → ELBOW
-*(;bel)             # ends in some arrangement of B, E, L</code></pre>
-      <p>
-        Parentheses with no <code>;</code> inside constrain nothing, so
-        <code>ele(ph)ant</code> is just <code>elephant</code>. <code>&amp;</code>
-        and <code>!</code> are whole-query operators and cannot appear inside a
-        subpattern. <code>`N</code> can: the block stays rigid and the literals
-        around it vary, so <code>ele(;nahpt)`1</code> matches ELEPHANT and
-        ALEPHANT.
-      </p>
-      <p>
-        A digit variable is one variable across the whole pattern, so it can be
-        bound in one block and spent in another — including inside an anagram
-        pool, which is the one place a digit was previously meaningless:
-      </p>
-      <pre><code>(1234)(;1234)     # 4 letters, then an anagram of those same 4 → REAPPEAR
-c(1)t;1           # the pool spends whatever the template bound</code></pre>
-      <p>
-        A variable has to be bound before it is spent, reading left to right, so
-        <code>(;1234)(1234)</code> is an error.
-      </p>
-      <p>
-        When a subpattern <em>and</em> the whole pattern both have an anagram,
-        the rule is that <strong>a letter excuses the outer pool from naming it
-        only if it sits in a template position — before a <code>;</code> — at
-        any depth. A letter in any pool never does.</strong> So against FOIBLE:
-      </p>
-      <pre><code>(;oif)(;bel);oifb      # matches: the word uses all of O, I, F, B
-(;oif)(;bel);oifblex   # matches: the word uses only pool letters (X spare)
-(;oif)(;bel);oifblx    # no: an E left over *and* an X unused</code></pre>
-
-      <h2>Logic</h2>
-      <p>Use <code>&amp;</code> to combine patterns and <code>!</code> to negate:</p>
-      <pre><code>c.. &amp; *at          # three-letter word starting with C and ending in AT
+;(che)rostra      # anagram of CHEROST RA that contains CHE exactly
+</code></pre>
+<h3>Canonicalization</h3>
+<p>Cases, accents, and unicode variants are ignored and preserved.
+(Internally, the engine canonicalizes the characters but also
+stores the dictionary’s original characters.)  So you can search for
+accented European words without worrying about typing the accents,
+for example (although it’s fine if you do).</p>
+<p>We also canonicalize things like <code>æ</code> into the “spelled-out”
+<code>ae</code>. Again, you can enter them either way and get the same results.
+(Note that this means <code>æ</code> is two letters, for wildcard-matching purposes.)</p>
+<p>Non-Latin letters are case- and accent-canonicalized in the same way,
+but won’t work with vowel and consonant patterns.</p>
+<h3>Subpatterns</h3>
+<p>Parentheses indicate a pattern within a pattern. This is mostly useful when you
+want to apply an anagram pattern to just part of a word, like
+<code>(f..;imou)(;bel)</code> gives <code>foible</code> and <code>fumble</code>.</p>
+<h3>Logic</h3>
+<p>Use <code>&amp;</code> to combine patterns and <code>!</code> to negate:</p>
+<pre><code>c.. &amp; *at          # three-letter word starting with C and ending in AT
 ;intra &amp; ! *a      # anagram match but not ending in -A
-!c* &amp; !*t          # doesn't start with C, doesn't end in T</code></pre>
+!c* &amp; !*t          # doesn't start with C, doesn't end in T
+</code></pre>
 
       <p class="footer"><a href="license.html">Open-source licenses</a></p>
     </main>

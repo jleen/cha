@@ -27,3 +27,7 @@ serde = { version = "1", features = ["derive"] }
 # (rust-lang/rust#100712) against cookie 0.18.1 under rustc 1.96. 0.3.47 still
 # satisfies plist's `^0.3.47`. Remove once tauri/cookie or rustc resolves it.
 time = "=0.3.47"
+
+[dev-dependencies]
+# Renders help/pattern-syntax.md into ui/pattern-syntax.html; see tests/help_page.rs.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

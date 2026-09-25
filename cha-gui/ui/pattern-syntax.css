@@ -59,21 +59,21 @@ th code {
   border: 1px solid var(--border);
 }
 
-table.tokens {
+main table {
   width: 100%;
   border-collapse: collapse;
   margin: 8px 0;
 }
 
-table.tokens th,
-table.tokens td {
+main table th,
+main table td {
   text-align: left;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
 
-table.tokens th {
+main table th {
   color: var(--muted);
   font-weight: 600;
   font-size: 12px;
@@ -81,7 +81,7 @@ table.tokens th {
   letter-spacing: 0.04em;
 }
 
-table.tokens td:first-child {
+main table td:first-child {
   white-space: nowrap;
 }
 

@@ -34,7 +34,10 @@ ai-generated: true
 - **How the license page is reached differs by platform, and the cross-links
   between it and Pattern Syntax exist only where they're the *only* route.** On
   mobile and web there is no menu bar, so the footer link at the bottom of
-  [`pattern-syntax.html`](../cha-gui/ui/pattern-syntax.html) is the only way in and
+  [`pattern-syntax.html`](../cha-gui/ui/pattern-syntax.html) (generated: the
+  footer and `<head>` live in
+  [`help/pattern-syntax.template.html`](../cha-gui/help/pattern-syntax.template.html),
+  the body in the maintainer's `pattern-syntax.md`) is the only way in and
   the license page's `←&nbsp;Pattern Syntax` back link is the only way out —
   both navigate the help sheet's iframe, where Back works but ✕ closes the whole
   sheet. On desktop each page has its own Help menu entry and its own window

@@ -23,6 +23,15 @@ them — the ones that should be in mind before any change — live in
 | [mobile.md](mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
 | [versioning.md](versioning.md) | bump the version, or wonder where a version string comes from |
 
+## Reference
+
+[patterns.md](patterns.md) is different from the notes above: it is written for
+*users*, as the complete rules of the pattern language. The maintainer's
+[README](../README.md) and the in-app help give the overview; this is the fine
+print. Every example in it was run against the committed `words.txt`, so a change
+that moves one of its results is a change to the language, and the reference
+must be updated in the same commit.
+
 ## About authorship
 
 This repository distinguishes between documentation the maintainer wrote and
@@ -34,8 +43,11 @@ should not have to guess.
   the top. [AGENTS.md](../AGENTS.md) carries the same banner (without the
   frontmatter, which would otherwise be loaded verbatim into an agent's
   context).
-- **[README.md](../README.md) is the maintainer's.** It carries no marker, and
-  an unmarked document in this repository should be read as human-authored.
+- **[README.md](../README.md) and the in-app help source,
+  [cha-gui/help/pattern-syntax.md](../cha-gui/help/pattern-syntax.md), are the
+  maintainer's.** They are where the maintainer speaks to users in their own
+  voice, so agents edit them only when asked. They carry no marker, and an
+  unmarked document in this repository should be read as human-authored.
 - **Commits already say so too.** This convention extends the existing
   `Co-Authored-By: Claude …` trailers to the file level, rather than
   introducing a new claim.
