@@ -79,21 +79,54 @@ rigid and don't count against *N*.
 
 ## Anagrams
 
-A semicolon introduces an anagram **pool**. The part before `;` is a
-**template** the word must fit, and the part after it is the set of letters the
-word must be an arrangement of.
+A semicolon introduces an anagram **pool**: the letters after the `;`. What the
+pool demands depends on whether there is a **template** (anything before the
+`;`).
+
+### Without a template: an exact anagram
+
+A pattern that starts with `;` finds words that are an arrangement of exactly the
+pool letters.
 
 ```
-;ilphone          # anagram of ILPHONE → PINHOLE
-;..exit           # anagram of EXIT plus any two letters → EXCITE, EXOTIC, FIXATE, …
+;ilphone          # PINHOLE
+;..exit           # EXIT plus any two letters → EXCITE, EXOTIC, FIXATE, …
+;cat*             # C, A, T plus any number of others → ABDICATE, ABDUCT, …
 ;doodle[ac][rn]   # DOODLE plus A or C, and R or N → CONDOLED
-t....;intra       # starts with T and is an anagram of INTRA → TRAIN
-;(che)rostra      # anagram of CHE + ROSTRA that contains CHE unbroken → ORCHESTRA
+;(che)rostra      # CHE + ROSTRA, with CHE unbroken → ORCHESTRA
 ```
 
-In a pool, `.` is one wildcard letter, `*` means "and any number of other
-letters", and `[…]` is one letter from the set. `@` and `#` are not allowed in a
-pool.
+In a pool, `.` is one letter that isn't in the pool, `*` is any number of them,
+and `[…]` is one letter from the set. `(…)` letters are part of the pool, and
+must also appear together, in that order. `@` and `#` are not allowed in a pool.
+
+### With a template: all of the pool, or only the pool
+
+When a template comes first, the template alone decides the word's length and
+shape. The pool constrains its letters, and a word passes if **either** of these
+is true:
+
+- it uses **every** pool letter, plus anything else; or
+- it uses **only** pool letters, though not necessarily all of them.
+
+So the template's length picks the direction:
+
+```
+t....;intra       # same length as the pool: an anagram → TRAIN
+...;intra         # shorter: only letters from INTRA → AIR, ANT, RAT, TIN, …
+.......;intra     # longer: all of INTRA, plus two → CERTAIN, CURTAIN, GRANITE, …
+....*;gdangboot   # both directions at once → TOAD, TOBOGGAN, TOBOGGANED, …
+```
+
+A template of just `*` lets in both directions at every length. That makes
+`*;cat` a superset of `;cat*`, which finds every word containing C, A and T,
+because `*;cat` also finds the words spelled only from those letters: A, AT, C,
+T.
+
+Letters the template pins count as pool letters, so `z....;brae` finds ZEBRA. A
+`.` in the pool lets one letter in from outside the pool on the "only" side, so
+`...;intra.` adds ACT, AFT, AIM, …. A `*` in the pool adds nothing when there is a
+template: `...;cat*` finds the same ACT and CAT as `...;cat`.
 
 ## Accents and other scripts
 

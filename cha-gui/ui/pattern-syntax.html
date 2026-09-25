@@ -64,7 +64,9 @@ letters after <code>;</code> are the pool.</p>
 ;..exit           # anagram of EXIT + 2 wildcards
 ;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
 t....;intra       # starts with T, is an anagram of INTRA
-;(che)rostra      # anagram of CHEROST RA that contains CHE exactly
+...;intra         # pattern shorter than pool, so letters can be dropped
+......;intra      # pattern longer than pool, so letters can be added
+;tent(ed)         # anagram of TENTED that contains ED exactly
 </code></pre>
 <h3>Canonicalization</h3>
 <p>Cases, accents, and unicode variants are ignored and preserved.
