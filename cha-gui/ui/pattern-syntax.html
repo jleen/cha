@@ -26,48 +26,48 @@
   <body>
     <main>
 <h2>Pattern Syntax</h2>
-<table><thead><tr><th>Token</th><th>Meaning</th></tr></thead><tbody>
-<tr><td><code>.</code></td><td>One letter</td></tr>
+<table><thead><tr><th>Symbol</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>a</code>–<code>z</code></td><td>Exact letter</td></tr>
+<tr><td><code>.</code></td><td>Any one letter</td></tr>
 <tr><td><code>*</code></td><td>Zero or more letters</td></tr>
-<tr><td><code>@</code></td><td>One vowel (a/e/i/o/u)</td></tr>
+<tr><td><code>@</code></td><td>One vowel (aeiou)</td></tr>
 <tr><td><code>#</code></td><td>One consonant</td></tr>
 <tr><td><code>[abc]</code></td><td>Matches any one of these letters</td></tr>
-<tr><td><code>a</code>–<code>z</code></td><td>Literal letter (case-insensitive)</td></tr>
 <tr><td><code>-</code> <code>'</code> <code> </code></td><td>Literal punctuation</td></tr>
-<tr><td><code>1</code>–<code>9</code></td><td>Same letter as other occurences of that digit</td></tr>
-<tr><td><code>`N</code></td><td>Allow up to <em>N</em> ”wrong” letters</td></tr>
-<tr><td>' <code>;</code></td><td>Introduces an anagram</td></tr>
-<tr><td><code>(…)</code></td><td>Subpattern, which may itself be an angram</td></tr>
+<tr><td><code>1</code>–<code>9</code></td><td>Same letter as other occurrences of that digit</td></tr>
+<tr><td><code>`N</code></td><td>Allow up to <em>N</em> “wrong” letters</td></tr>
+<tr><td><code>;···</code></td><td>Anagram</td></tr>
+<tr><td><code>(···)</code></td><td>Subpattern, which may itself include an anagram</td></tr>
 </tbody></table>
+<h3>Examples</h3>
+<pre><code>.y...l        # HYMNAL, SYMBOL
+@#@#@#@#@#@   # alternating vowels and consonants, 11 letters
+1234321       # palindromes (DEIFIED, RACECAR)
+...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT)
+</code></pre>
+<h3>Anagrams</h3>
+<p>A semicolon introduces an anagram pool. Letters before <code>;</code> are a pattern.
+Letters after <code>;</code> are the anagram pool.</p>
+<pre><code>;ilphone          # PINHOLE
+;..exit           # EXCITE (anagram EXIT plus two wildcards)
+;doodle[ac][rn]   # CONDOLED (anagram with choices)
+t....;intra       # TRAIN (anagram starting with T)
+...;intra         # TIN (pattern shorter than pool, so anagram letters can be dropped)
+......;intra      # RATING (pattern longer than pool, so anagram letters can be added)
+;tent(ed)         # NETTED (anagram of TENTED that contains ED exactly)
+</code></pre>
 <h3>Wrong letters</h3>
-<p>A pattern postfixed with <code>`N</code> means that <code>N</code> many literals can be
+<p>A pattern ending in <code>`N</code> means that <code>N</code> many literals can be
 “wrong,” i.e. different from the given.</p>
 <ul>
 <li><code>foo`1</code> will match <code>foe</code> and <code>goo</code>.</li>
 <li><code>electron`2</code> will match <code>ejection</code> and several others.</li>
 </ul>
-<p>This feature can’t be combined with anagrams or backreferences (yet).</p>
+<p>This feature can’t be combined with anagrams or number patterns (yet).</p>
 <h3>Punctuation</h3>
 <p>Punctuation in the word list is ignored, unless punctuation is provided
 in the pattern. If the pattern is punctuated then the word must match the
 punctuation.</p>
-<h3>Examples</h3>
-<pre><code>.y...l        # HYMNAL, SYMBOL, …
-@#@#@#@#@#@   # alternating vowel/consonant, 11 letters
-1234321       # palindromes (DEIFIED, RACECAR, …)
-...-..-.....  # 3-2-5 hyphenated (FLY-BY-NIGHT, …)
-</code></pre>
-<h3>Anagrams</h3>
-<p>A semicolon introduces an anagram pool. Letters before <code>;</code> are a template;
-letters after <code>;</code> are the pool.</p>
-<pre><code>;ilphone          # anagram of ILPHONE → PINHOLE, …
-;..exit           # anagram of EXIT + 2 wildcards
-;doodle[ac][rn]   # anagram DOODLE plus either A or C, and R or N
-t....;intra       # starts with T, is an anagram of INTRA
-...;intra         # pattern shorter than pool, so letters can be dropped
-......;intra      # pattern longer than pool, so letters can be added
-;tent(ed)         # anagram of TENTED that contains ED exactly
-</code></pre>
 <h3>Canonicalization</h3>
 <p>Cases, accents, and unicode variants are ignored and preserved.
 (Internally, the engine canonicalizes the characters but also
@@ -77,8 +77,8 @@ for example (although it’s fine if you do).</p>
 <p>We also canonicalize things like <code>æ</code> into the “spelled-out”
 <code>ae</code>. Again, you can enter them either way and get the same results.
 (Note that this means <code>æ</code> is two letters, for wildcard-matching purposes.)</p>
-<p>Non-Latin letters are case- and accent-canonicalized in the same way,
-but won’t work with vowel and consonant patterns.</p>
+<p>Non-Latin letters are case- and accent-canonicalized in the same way.
+The vowel and consonant symbols only apply to the Latin alphabet.</p>
 <h3>Subpatterns</h3>
 <p>Parentheses indicate a pattern within a pattern. This is mostly useful when you
 want to apply an anagram pattern to just part of a word, like
@@ -86,8 +86,8 @@ want to apply an anagram pattern to just part of a word, like
 <h3>Logic</h3>
 <p>Use <code>&amp;</code> to combine patterns and <code>!</code> to negate:</p>
 <pre><code>c.. &amp; *at          # three-letter word starting with C and ending in AT
-;intra &amp; ! *a      # anagram match but not ending in -A
-!c* &amp; !*t          # doesn't start with C, doesn't end in T
+;intra &amp; ! *a      # anagram but not ending in A
+!c* &amp; !*t          # doesn't start with C or end in T
 </code></pre>
 
       <p class="footer"><a href="license.html">Open-source licenses</a></p>

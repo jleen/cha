@@ -10,9 +10,9 @@
 | `[abc]` | Matches any one of these letters |
 | `-` `'` ` ` | Literal punctuation |
 | `1`–`9` | Same letter as other occurrences of that digit |
-| `` `N `` | Allow up to *N* ”wrong” letters |
+| `` `N `` | Allow up to *N* “wrong” letters |
 | `;···` | Anagram |
-| `(···)` | Subpattern, which may itself include an angram |
+| `(···)` | Subpattern, which may itself include an anagram |
 
 ### Examples
 
