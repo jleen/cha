@@ -82,9 +82,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY cha-core/Cargo.toml cha-core/
 COPY cha-web/Cargo.toml cha-web/
 COPY cha-gui/src-tauri/Cargo.toml cha-gui/src-tauri/
-RUN mkdir -p src cha-core/src cha-web/src cha-gui/src-tauri/src \
+COPY cha-wasm/Cargo.toml cha-wasm/
+RUN mkdir -p src cha-core/src cha-web/src cha-gui/src-tauri/src cha-wasm/src \
  && echo 'fn main(){}' > src/main.rs \
- && touch cha-core/src/lib.rs cha-gui/src-tauri/src/lib.rs \
+ && touch cha-core/src/lib.rs cha-gui/src-tauri/src/lib.rs cha-wasm/src/lib.rs \
  && echo 'fn main(){}' > cha-web/src/main.rs \
  && cargo fetch --locked
 
@@ -96,8 +97,10 @@ RUN mkdir -p src cha-core/src cha-web/src cha-gui/src-tauri/src \
 RUN cargo build --release --locked -p cha-web --target "$(cat /rust-target)"
 
 # Now the real sources. cha-gui/ui is required because cha-web embeds the front
-# end with include_dir!; cha-gui/src-tauri is NOT built (we only build -p
-# cha-web), but its manifest has to be present for the workspace to resolve.
+# end with include_dir!; cha-gui/src-tauri and cha-wasm are NOT built (we only
+# build -p cha-web), but their manifests have to be present for the workspace to
+# resolve. A new workspace member needs a COPY and a stub above, or this image
+# fails at `cargo fetch` — and only on a release tag, since no other CI builds it.
 COPY cha-core cha-core
 COPY cha-web cha-web
 COPY cha-gui/ui cha-gui/ui

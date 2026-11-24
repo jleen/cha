@@ -95,6 +95,10 @@ axum's tier is ~6 s, and an incremental `clippy --workspace` is under a second.
 `tokio`'s features are already narrowed to the five this server uses, so there
 is no easy win left; don't trade the check's coverage for its speed.
 
+**Adding a workspace member also means a `COPY` and a stub in
+[`deploy/Dockerfile`](deploy/Dockerfile)**, or the image fails at `cargo fetch` —
+and nothing but a release tag builds that image, so it surfaces mid-release.
+
 **`--workspace` is load-bearing on `cargo test`, not decoration.** The root
 package is the CLI crate `cha`, which has no tests of its own, so a plain
 `cargo test` resolves to that package and cheerfully reports success having run
