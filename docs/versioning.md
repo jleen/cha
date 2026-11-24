@@ -13,7 +13,7 @@ ai-generated: true
 # Versioning: one number, in `[workspace.package]`
 
 **To bump the version, edit `version` under `[workspace.package]` in the root
-`Cargo.toml`. That is the only place.** All four crates inherit it with
+`Cargo.toml`. That is the only place.** All five crates inherit it with
 `version.workspace = true`, and everything downstream chains off that:
 
 - **The Tauri bundle version** — `tauri.conf.json` deliberately has **no**
@@ -21,7 +21,7 @@ ai-generated: true
   `cha-gui/src-tauri/Cargo.toml` (see `tauri-codegen`'s `context.rs`). Don't
   "helpfully" add the field back; that reintroduces a second source of truth.
   Tauri's own docs recommend the opposite direction, which is right for a
-  single-crate app and wrong for this four-crate workspace.
+  single-crate app and wrong for this five-crate workspace.
 - **Android's `versionName`/`versionCode`** — derived from the crate version
   into the git-ignored `gen/android/app/tauri.properties`, regenerated per build.
 - **The container image tag and the GitHub release name** — derived from the git
@@ -45,6 +45,11 @@ ai-generated: true
   Keep `project.yml` and `Info.plist` in sync by hand — nothing runs XcodeGen in
   CI, and `tauri ios init` would clobber the hand edits in `project.yml` (the
   `PATH` preBuildScript, `ARCHS`, `LIBRARY_SEARCH_PATHS`).
+
+- **The static build's service worker cache name** — `cha-wasm/build.sh` reads
+  this same `[workspace.package]` version and stamps `<version>-<content hash>`
+  into `dist/sw.js` (see [static.md](static.md)). The hash, not the version, is
+  what triggers client updates, so a deploy needs no bump.
 
 One accepted cost of dropping `version` from `tauri.conf.json`: a macOS
 `tauri dev` run's embedded `Info.plist` no longer gets

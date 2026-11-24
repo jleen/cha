@@ -1,0 +1,57 @@
+name: Pages
+
+# Publishes the serverless static build (cha-wasm/dist) to GitHub Pages on every
+# push to main. This is the "fork, hack, push, get a URL" loop: a fork needs no
+# local toolchain at all, only Settings → Pages → Source: "GitHub Actions".
+# Until that is set, the deploy job fails and nothing is published.
+#
+# The same dist/ deploys anywhere else with rsync; see docs/static.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and a newer push supersedes a queued one: only the
+# latest main is worth publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build dist/
+        run: cha-wasm/build.sh
+
+      # The runner's preinstalled Node is enough; the tests use only built-ins.
+      - name: Contract tests
+        run: node cha-wasm/test.mjs
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: cha-wasm/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

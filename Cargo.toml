@@ -1,14 +1,14 @@
 [workspace]
-members = ["cha-core", "cha-gui/src-tauri", "cha-web"]
+members = ["cha-core", "cha-gui/src-tauri", "cha-web", "cha-wasm"]
 
-# The single source of truth for the version. All four crates move in lockstep
+# The single source of truth for the version. All five crates move in lockstep
 # via `version.workspace = true`, and the Tauri bundle version chains off
 # cha-gui's crate version (tauri.conf.json deliberately has no `version` field),
 # so this line alone sets the CLI, the desktop/mobile app, and the web server.
 # iOS reads it too: ios-testflight.yml parses this value and passes it to
 # xcodebuild as MARKETING_VERSION, which Info.plist references.
 [workspace.package]
-version = "0.6.2"
+version = "0.7.0"
 
 # The matcher's hot loop scans the whole word list on every query (83.6k words as
 # committed; the crate aims much higher) and is unusable when compiled

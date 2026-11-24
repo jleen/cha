@@ -7,10 +7,12 @@
 
 # Instructions for agents working in this repo
 
-Cha is a Rust workspace shipping one matcher (`cha-core`) to five surfaces: a
-CLI (`cha`), a Tauri desktop app (`cha-gui`), an axum server (`cha-web`), and
-iOS + Android builds of that same GUI crate. There is exactly one copy of the
-front end, in `cha-gui/ui/`, embedded by every shell that serves it.
+Cha is a Rust workspace shipping one matcher (`cha-core`) to six surfaces: a
+CLI (`cha`), a Tauri desktop app (`cha-gui`), an axum server (`cha-web`), iOS +
+Android builds of that same GUI crate, and a serverless static web build
+(`cha-wasm`) that runs the matcher as WebAssembly in the browser. There is
+exactly one copy of the front end, in `cha-gui/ui/`, embedded or copied by every
+shell that serves it.
 
 This file is the standing rules — the things worth having in mind before any
 change. The long-form *why* for each surface lives in [docs/](docs/), and is
@@ -22,6 +24,7 @@ worth opening before you work in that area:
 | [docs/gui.md](docs/gui.md) | change Tauri command threading, add a window or menu item, or regenerate the desktop icon |
 | [docs/web.md](docs/web.md) | change an `/api` route, a server-side limit, the Dockerfile, or anything in `deploy/` |
 | [docs/mobile.md](docs/mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
+| [docs/static.md](docs/static.md) | touch `cha-wasm/`, the service worker, the Pages workflow, or `transport.js`'s worker branch |
 | [docs/versioning.md](docs/versioning.md) | bump the version, or wonder where a version string comes from |
 | [docs/patterns.md](docs/patterns.md) | add or change pattern syntax — it is the user-facing reference, and must be updated in the same commit |
 
@@ -82,8 +85,8 @@ else.
 cargo clippy -p cha-core --examples
 ```
 
-The workspace has three members (`cha-core`, `cha-gui/src-tauri`, `cha-web`) plus
-the CLI crate (`cha`) at the root; `--workspace` covers the libraries — build the
+The workspace has four members (`cha-core`, `cha-gui/src-tauri`, `cha-web`,
+`cha-wasm`) plus the CLI crate (`cha`) at the root; `--workspace` covers the libraries — build the
 GUI explicitly with `cargo build -p cha-gui` when touching it. `--workspace` now
 also pulls `cha-web`'s axum/tokio tree — 87 crates against `cha-core`'s 8 — but
 the cost of that is small and worth measuring before working around it: on a
@@ -196,6 +199,12 @@ combinatorial path without a ceiling there.
   [`limitcal`](cha-core/examples/limitcal.rs) before changing it, and read
   [docs/core.md](docs/core.md) first.
 
+**`cha-wasm` must never set `deadline`.** `Instant::now()` panics on
+`wasm32-unknown-unknown`, and `cha-core` reads the clock only when a deadline is
+set. So a new `Instant::now()` on the search path that isn't behind that check
+would crash the static build at runtime while every host build and test stays
+green. See [docs/static.md](docs/static.md).
+
 Exceeding a *match-time* limit degrades to "no match", which is what keeps the
 hot path `Result`-free. Exceeding the *compile-time* limit is a normal
 `PatternError`. **A limit that truncates is a correctness bug**, so prefer
@@ -235,7 +244,7 @@ reported regression is one that reproduced. Exit 2 is a timing regression, 3 is
 moved match counts — **a changed match count outranks any timing delta**, because
 a word that exceeds a per-word limit degrades to "no match" and truncation reads
 as a speedup. The run takes ~20 s, so it is **not** a per-commit gate; skip it for
-docs, the GUI/web/mobile shells, the front end, and the workflows. New pattern
+docs, the GUI/web/mobile/static shells, the front end, and the workflows. New pattern
 syntax adds its own entry to `perf.rs`'s corpus in the same commit.
 `cha <pattern> -b <N>` is a quick spot check only: it bypasses `search` and
 reports a bare mean.
@@ -290,7 +299,7 @@ See [docs/core.md](docs/core.md).
 ## Versioning: one number, in `[workspace.package]`
 
 **To bump the version, edit `version` under `[workspace.package]` in the root
-`Cargo.toml`. That is the only place.** All four crates inherit it with
+`Cargo.toml`. That is the only place.** All five crates inherit it with
 `version.workspace = true`. In particular `tauri.conf.json` deliberately has
 **no** `version` field — don't "helpfully" add it back; that reintroduces a
 second source of truth. Android's `versionName`/`versionCode`, the container tag
@@ -308,18 +317,25 @@ one path that still needs a hand edit.
   ambiguously) and **don't** infer platform from `@media (pointer: coarse)` —
   that's a touch question, not a platform question.
 - **Transport is chosen separately**, in
-  [`transport.js`](cha-gui/ui/transport.js), by testing whether
-  `window.__TAURI__` is present in *this document*. A desktop browser hitting
-  `cha-web` has the HTTP transport and is not a phone; keep the two questions
-  apart. The HTTP shim must reject with a **bare string**, not an `Error`.
+  [`transport.js`](cha-gui/ui/transport.js): Tauri IPC if `window.__TAURI__`
+  is present in *this document*, the WebAssembly worker if the page carries the
+  `cha-transport` marker that `cha-wasm/build.sh` injects, else HTTP. A desktop
+  browser hitting `cha-web` has the HTTP transport and is not a phone; keep the
+  two questions apart. Every transport must reject with a **bare string**, not
+  an `Error`.
+- **Live search vs. explicit submit is a transport question.** It hangs off
+  `window.chaRemote` (true only for HTTP), not off `platform`: the static build
+  is the `"web"` platform but searches locally.
 - **Mobile and responsive CSS is additive by construction.** A rule that needs
   `.mobile` in order to *avoid* breaking desktop is written wrong.
 
 ## Adding a command
 
-A command must be added in **both** backends or the front end breaks on one
-transport: `generate_handler!` in [`lib.rs`](cha-gui/src-tauri/src/lib.rs) and a
-`post()` route in [`main.rs`](cha-web/src/main.rs). Argument names must match
+A command must be added in **all three** backends or the front end breaks on one
+transport: `generate_handler!` in [`lib.rs`](cha-gui/src-tauri/src/lib.rs), a
+`post()` route in [`main.rs`](cha-web/src/main.rs), and the `commands` table in
+[`worker.js`](cha-wasm/www/worker.js). Run `cha-wasm/build.sh && node cha-wasm/test.mjs`
+after touching the worker. Argument names must match
 what `main.js` passes. Beware that Tauri camelCases snake_case argument names on
 the JS side, so a two-word argument needs `#[serde(rename)]` on the web struct to
 keep the two transports speaking one protocol. No current argument has two words.

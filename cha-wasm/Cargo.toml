@@ -1,0 +1,16 @@
+[package]
+name = "cha-wasm"
+version.workspace = true
+edition = "2021"
+
+# The matcher compiled to WebAssembly, for the serverless static build: a page
+# that downloads the front end, this module and the word list, and searches on
+# the device. See www/ and build.sh. A workspace member so `cargo clippy
+# --workspace` lints it — it builds for the host too, just uselessly.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cha-core = { path = "../cha-core", features = ["serde"] }
+serde_json = "1"

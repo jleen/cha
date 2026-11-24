@@ -15,3 +15,4 @@ cha-gui/src-tauri/gen/schemas/
 # Word lists mounted into the cha-web container at run time (see deploy/README.md).
 # Deployment data, not source.
 deploy/dictionaries/
+cha-wasm/dist/

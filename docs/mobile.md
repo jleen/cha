@@ -75,9 +75,10 @@ class, or a CSS rule that is a literal no-op on desktop.
   open the licenses. Keep using `replace` for that — assigning `src` puts the
   bug above straight back.
 - **Transport is chosen separately from platform, and the distinction matters.**
-  [`transport.js`](../cha-gui/ui/transport.js) sets `window.chaInvoke` to either
-  Tauri's `invoke` or an HTTP `POST /api/<command>`, deciding by testing for
-  `window.__TAURI__`. That looks like the UA-sniffing the rule above forbids and
+  [`transport.js`](../cha-gui/ui/transport.js) sets `window.chaInvoke` to
+  Tauri's `invoke`, the static build's WebAssembly worker, or an HTTP
+  `POST /api/<command>`, deciding by testing for `window.__TAURI__` and then for
+  the `cha-transport` marker (see [static.md](static.md)). That looks like the UA-sniffing the rule above forbids and
   isn't: it asks "is the IPC bridge present in *this document*", a directly
   observable fact about how the page loaded, not a guess about the machine. The
   two questions are genuinely independent — a desktop browser hitting `cha-web`

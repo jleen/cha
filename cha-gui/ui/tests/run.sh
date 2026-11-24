@@ -29,7 +29,7 @@ fi
 # touches, then transport.js itself, then the tests. Concatenating rather than
 # importing keeps transport.js free of any module system — it's loaded by a plain
 # <script> tag in the real app and must stay that way.
-tmp=$(mktemp -t cha-shim-test)
+tmp=$(mktemp -t cha-shim-test.XXXXXX)
 trap 'rm -f "$tmp"' EXIT
 
 cat > "$tmp" <<'PRELUDE'
@@ -37,6 +37,8 @@ cat > "$tmp" <<'PRELUDE'
 // `window` with no __TAURI__ is what sends transport.js down its HTTP branch;
 // that absence is the entire condition under test.
 var window = {};
+// No cha-transport <meta>, so transport.js doesn't take the wasm-worker branch.
+var document = { querySelector: function () { return null; } };
 var lastReq = null;
 function fetch(url, opts) {
   lastReq = { url: url, opts: opts };

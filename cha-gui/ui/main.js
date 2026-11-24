@@ -10,15 +10,16 @@ const helpSheet = document.querySelector("#help-sheet");
 const helpFrame = document.querySelector("#help-frame");
 const goBtn = document.querySelector("#go");
 
-// How each surface submits a query. Web is the only one where a keystroke costs
-// a network round trip and a JSON payload, so it waits for an explicit submit;
-// the local apps search live as you type. Switching web to live search is a
-// one-line change here (`live: true` with a longer debounce) — nothing else
-// needs to move, and #go simply stays hidden.
+// How a query is submitted. That depends on the transport, not the platform:
+// only cha-web's HTTP transport makes a keystroke cost a network round trip and
+// a JSON payload, so only it waits for an explicit submit. The apps and the
+// serverless static build search on the device, live as you type — the static
+// build is the "web" platform but searches locally. Switching remote to live
+// search is a one-line change here (`live: true` with a longer debounce) —
+// nothing else needs to move, and #go simply stays hidden.
 const SUBMISSION = {
-  desktop: { live: true, debounceMs: 100 },
-  mobile: { live: true, debounceMs: 100 },
-  web: { live: false, debounceMs: 350 },
+  local: { live: true, debounceMs: 100 },
+  remote: { live: false, debounceMs: 350 },
 };
 
 let timer;
@@ -58,8 +59,8 @@ async function checkDict(platform) {
 }
 
 // Wire up whichever submission model this surface uses. Called once at startup.
-function configureSubmission(platform) {
-  const { live, debounceMs } = SUBMISSION[platform];
+function configureSubmission() {
+  const { live, debounceMs } = SUBMISSION[window.chaRemote ? "remote" : "local"];
   if (live) {
     input.addEventListener("input", () => {
       clearTimeout(timer);
@@ -165,7 +166,7 @@ async function init() {
     enableNewWindowShortcut();
   }
 
-  configureSubmission(platform);
+  configureSubmission();
   await checkDict(platform);
 }
 init();

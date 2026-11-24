@@ -99,6 +99,13 @@ cargo tauri dev      # run a debug build
 cargo tauri build    # compile and package a release build
 ```
 
+### PWA
+
+The web client version (a set of static HTML pages that require no server and run as WASM in the browser)
+is built by `cha-wasm/build.sh`. (You’ll need to `rustup target add wasm32-unknown-unknown` if you haven’t already.) The resulting `cha-wasm/dist/` can be copied to any web server.
+There’s also a GitHub Action provided to deploy the PWA to GitHub Pages.
+
+
 ## Benchmarking
 
 The CLI has a “benchmarking” mode: if you run `cha <pattern> -b<N>`, it will load the dictionary once, and then run the pattern search *N* times in succession,

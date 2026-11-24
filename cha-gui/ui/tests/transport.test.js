@@ -22,6 +22,9 @@ function check(name, cond) {
   if (!cond) fails++;
 }
 
+// 0. HTTP is the one remote transport: main.js keys explicit submit off this.
+check("marks the HTTP transport remote", window.chaRemote === true);
+
 // 1. Success: parsed JSON, and the request is shaped the way cha-web expects.
 fetch.next = resp(true, 200, '{"total":3,"groups":[]}');
 window

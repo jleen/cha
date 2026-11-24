@@ -172,9 +172,10 @@ header {
   outline-offset: 2px;
 }
 
-/* Explicit-submit button, shown only on the web build. Height matches #help's
-   44px touch target so the two sit level beside the input. `hidden` keeps it out
-   of the layout entirely on the local apps, which search as you type. */
+/* Explicit-submit button, shown only over cha-web's HTTP transport. Height
+   matches #help's 44px touch target so the two sit level beside the input.
+   `hidden` keeps it out of the layout entirely everywhere that searches on the
+   device (the apps and the static build), which search as you type. */
 #go {
   flex: 0 0 auto;
   height: 44px;

@@ -21,6 +21,7 @@ them — the ones that should be in mind before any change — live in
 | [gui.md](gui.md) | change Tauri command threading, add a window or menu item, or regenerate the desktop icon |
 | [web.md](web.md) | change an `/api` route, a server-side limit, the Dockerfile, or anything in `deploy/` |
 | [mobile.md](mobile.md) | build for a phone, touch `gen/`, or go near release signing and the mobile workflows |
+| [static.md](static.md) | touch `cha-wasm/`, the service worker, the Pages workflow, or `transport.js`'s worker branch |
 | [versioning.md](versioning.md) | bump the version, or wonder where a version string comes from |
 
 ## Reference

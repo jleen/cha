@@ -13,7 +13,9 @@ ai-generated: true
 # Web (`cha-web`, axum)
 
 `cha-web` serves the same engine and the same front end over HTTP, as a single
-binary. Run it with `cargo run -p cha-web`; `--dict-dir DIR` adds server-side
+binary. The serverless static build ([static.md](static.md)) covers most of the
+same ground with no server to run, so `cha-web` is likely to be deprecated;
+until then, a new command needs a route here *and* an entry in `worker.js`. Run it with `cargo run -p cha-web`; `--dict-dir DIR` adds server-side
 word lists, `--ui-dir cha-gui/ui` serves the front end from disk so you can edit
 and reload without a rebuild.
 

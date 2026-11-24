@@ -14,8 +14,40 @@
 // command, which is compiled truth. Conflating the two questions is exactly the
 // bug that rule exists to prevent: a desktop browser hitting cha-web has the
 // HTTP transport but is not a phone.
+//
+// A third transport, a Web Worker running the matcher as WebAssembly, serves the
+// serverless static build (cha-wasm/). Its marker is a <meta> tag that
+// cha-wasm/build.sh injects into its copy of index.html — again a fact about how
+// this page was built, not a guess about the device. It answers `platform` with
+// "web" like cha-web does: same browser surface, different transport.
+const wasmBuild = document.querySelector('meta[name="cha-transport"][content="wasm"]');
+
+// Whether a query costs a network round trip. That is a transport fact, so it
+// lives here; main.js reads it to choose live search vs explicit submit.
+window.chaRemote = !window.__TAURI__ && !wasmBuild;
+
+function workerInvoke() {
+  const worker = new Worker("worker.js");
+  const pending = new Map();
+  let nextId = 0;
+  worker.onmessage = ({ data: { id, ok, value, error } }) => {
+    const p = pending.get(id);
+    pending.delete(id);
+    if (ok) p.resolve(value);
+    else p.reject(error); // already a bare string; see worker.js
+  };
+  return (command, args) =>
+    new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ id, command, args });
+    });
+}
+
 window.chaInvoke = window.__TAURI__
   ? window.__TAURI__.core.invoke
+  : wasmBuild
+  ? workerInvoke()
   : async function httpInvoke(command, args) {
       const res = await fetch(`/api/${command}`, {
         method: "POST",
