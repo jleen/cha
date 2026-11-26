@@ -27,6 +27,10 @@ check("index.html carries the wasm transport marker", index.includes('name="cha-
 check("index.html links the manifest", index.includes('rel="manifest"'));
 check("index.html registers the service worker", index.includes('src="pwa.js"'));
 
+const linked = [...index.matchAll(/href="(icons\/[^"]+)"/g)].map((m) => "./" + m[1]);
+check("index.html links a tab icon", index.includes('rel="icon"'));
+check("every icon index.html links exists", linked.length > 0 && linked.every((i) => built.includes(i)), linked.join(" "));
+
 const sw = readFileSync(join(dist, "sw.js"), "utf8");
 check("sw.js has no unfilled placeholders", !sw.includes("__CHA_"));
 const files = JSON.parse(sw.match(/const FILES = (\[.*\]);/)[1]);

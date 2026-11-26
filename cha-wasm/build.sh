@@ -33,12 +33,24 @@ else
   echo "warning: no words.txt at the repo root; the page will say so" >&2
 fi
 
-# The manifest's icons are the desktop app's (transparent margin, fine in a
-# browser's install UI). The home-screen icon is iOS's own 180px app icon:
-# iOS fills transparency with black, and that one is already full-bleed.
-cp "$icons/icon.png" "$dist/icons/icon-512.png"
+# Every icon is one the native apps already ship, copied rather than resized
+# so this script needs no image tools:
+# - tab icons and the manifest's "any" icons: the desktop set (rounded, with a
+#   transparent margin), plus Android's 192px launcher icon, the size Chrome
+#   asks for;
+# - the iOS home-screen icon: iOS's own 180px app icon, because iOS fills
+#   transparency with black and that one is already full-bleed;
+# - the manifest's "maskable" icon (Android crops it to its launcher's shape):
+#   iOS's full-bleed 1024px icon. Its glyph reaches exactly the 40%-radius safe
+#   zone a maskable icon must keep content inside, so it survives a circle crop.
+android_icons=$root/cha-gui/src-tauri/gen/android/app/src/main/res
+cp "$icons/32x32.png" "$dist/icons/icon-32.png"
+cp "$icons/64x64.png" "$dist/icons/icon-64.png"
+cp "$android_icons/mipmap-xxxhdpi/ic_launcher.png" "$dist/icons/icon-192.png"
 cp "$icons/128x128@2x.png" "$dist/icons/icon-256.png"
+cp "$icons/icon.png" "$dist/icons/icon-512.png"
 cp "$apple_icons/AppIcon-60x60@3x.png" "$dist/icons/apple-touch-icon.png"
+cp "$apple_icons/AppIcon-512@2x.png" "$dist/icons/maskable-1024.png"
 
 # Splice www/head.html (the transport marker transport.js looks for, plus the PWA
 # links) into the copy, so the shared index.html stays identical for the Tauri

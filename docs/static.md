@@ -45,9 +45,23 @@ no bundler; `build.sh` uses POSIX tools only and runs on macOS too.
 | `.github/workflows/pages.yml` | build, test, publish to GitHub Pages on push to `main` |
 
 `cha-gui/ui/` is copied into `dist/`, never edited for this build: the one shared
-`index.html` gets `head.html` spliced into its copy. Icons come from the desktop
-icon set (manifest) and the iOS app icon set (`apple-touch-icon`, because iOS
-fills transparency with black and that icon is already full-bleed).
+`index.html` gets `head.html` spliced into its copy.
+
+Every icon is one a native app already ships, copied rather than resized so
+`build.sh` needs no image tools:
+
+| Role | Source |
+|---|---|
+| Browser tab (`rel="icon"`, 32 and 64 px) | desktop `icons/` |
+| Manifest "any" (192, 256, 512 px) | Android's xxxhdpi launcher icon; desktop `icons/` |
+| iOS home screen (`apple-touch-icon`, 180 px) | iOS `AppIcon-60x60@3x`. iOS fills transparency with black, and this one is already full-bleed |
+| Manifest "maskable" (1024 px) | iOS `AppIcon-512@2x`, full-bleed |
+
+A maskable icon gets cropped to the launcher's shape (often a circle), so its
+content must stay within 40% of the width from the centre. Thresholded at
+200 px, the glyph's furthest white pixel lands at exactly 0.400, so it survives
+the crop but has no margin. If the icon is redrawn, re-check it before keeping
+the maskable entry.
 
 ## How the front end reaches it
 
